@@ -13,6 +13,7 @@ dist
 dist-ssr
 ssl
 *.local
+*.tsbuildinfo
 
 # Editor directories and files
 .DS_Store
@@ -21,3 +22,10 @@ ssl
 *.njsproj
 *.sln
 *.sw?
+
+# Playwright
+e2e/test-results/
+test-results/
+e2e/playwright-report/
+e2e/blob-report/
+e2e/.auth/

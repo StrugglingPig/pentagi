@@ -1,8 +1,14 @@
-import { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import { useQuery, useSubscription } from '@apollo/client/react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 
 import type { Provider } from '@/models/provider';
 
-import { useProvidersQuery } from '@/graphql/types';
+import {
+    ProviderCreatedDocument,
+    ProviderDeletedDocument,
+    ProvidersDocument,
+    ProviderUpdatedDocument,
+} from '@/graphql/types';
 import { findProviderByName, sortProviders } from '@/models/provider';
 import { useUser } from '@/providers/user-provider';
 
@@ -20,28 +26,42 @@ interface ProvidersProviderProps {
     children: React.ReactNode;
 }
 
-export const ProvidersProvider = ({ children }: ProvidersProviderProps) => {
+export function ProvidersProvider({ children }: ProvidersProviderProps) {
     const { isAuthenticated } = useUser();
 
-    const { data: providersData } = useProvidersQuery({
+    const { data: providersData, refetch: refetchProviders } = useQuery(ProvidersDocument, {
         skip: !isAuthenticated(),
     });
 
-    // Create sorted providers list to ensure consistent order
-    const providers = sortProviders(providersData?.providers || []);
+    // The providers list is a separate root field from the settings page's own
+    // query, so editing a provider there leaves this copy stale — and a stale
+    // copy means the composer offers a provider name the backend no longer
+    // resolves. Refetch on every provider mutation instead of waiting for a
+    // page reload.
+    const refetchOnProviderEvent = useCallback(() => {
+        if (!isAuthenticated()) {
+            return;
+        }
 
-    // Store selected provider name instead of the provider object
+        void refetchProviders();
+    }, [isAuthenticated, refetchProviders]);
+
+    const subscriptionSkip = !isAuthenticated();
+    useSubscription(ProviderCreatedDocument, { onData: refetchOnProviderEvent, skip: subscriptionSkip });
+    useSubscription(ProviderUpdatedDocument, { onData: refetchOnProviderEvent, skip: subscriptionSkip });
+    useSubscription(ProviderDeletedDocument, { onData: refetchOnProviderEvent, skip: subscriptionSkip });
+
+    const providers = useMemo(() => sortProviders(providersData?.providers || []), [providersData?.providers]);
+
     const [selectedProviderName, setSelectedProviderName] = useState<null | string>(() => {
         return localStorage.getItem(SELECTED_PROVIDER_KEY);
     });
 
-    // Compute selected provider from providers list and selected name
     const selectedProvider = useMemo(() => {
         if (providers.length === 0) {
             return null;
         }
 
-        // Try to find saved provider
         if (selectedProviderName) {
             const savedProvider = findProviderByName(selectedProviderName, providers);
 
@@ -50,31 +70,32 @@ export const ProvidersProvider = ({ children }: ProvidersProviderProps) => {
             }
         }
 
-        // If no saved provider or not found, return first provider
         return providers[0] ?? null;
     }, [providers, selectedProviderName]);
 
-    // Save to localStorage when selected provider changes
     useEffect(() => {
         if (selectedProvider) {
             localStorage.setItem(SELECTED_PROVIDER_KEY, selectedProvider.name);
         }
     }, [selectedProvider]);
 
-    const setSelectedProvider = (provider: Provider) => {
+    const setSelectedProvider = useCallback((provider: Provider) => {
         setSelectedProviderName(provider.name);
-    };
+    }, []);
 
-    const value = {
-        providers,
-        selectedProvider,
-        setSelectedProvider,
-    };
+    const value = useMemo(
+        () => ({
+            providers,
+            selectedProvider,
+            setSelectedProvider,
+        }),
+        [providers, selectedProvider, setSelectedProvider],
+    );
 
     return <ProvidersContext.Provider value={value}>{children}</ProvidersContext.Provider>;
-};
+}
 
-export const useProviders = () => {
+export function useProviders() {
     const context = useContext(ProvidersContext);
 
     if (context === undefined) {
@@ -82,4 +103,4 @@ export const useProviders = () => {
     }
 
     return context;
-};
+}

@@ -2,7 +2,9 @@ package providers
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -21,26 +23,36 @@ import (
 )
 
 func wrapError(ctx context.Context, msg string, err error) error {
-	logrus.WithContext(ctx).WithError(err).Error(msg)
+	obs.LogErrorOrCancel(logrus.WithContext(ctx), err, msg)
 	return fmt.Errorf("%s: %w", msg, err)
 }
 
 func wrapErrorEndAgentSpan(ctx context.Context, span langfuse.Agent, msg string, err error) error {
-	logrus.WithContext(ctx).WithError(err).Error(msg)
+	obs.LogErrorOrCancel(logrus.WithContext(ctx), err, msg)
 	err = fmt.Errorf("%s: %w", msg, err)
+
+	level := langfuse.ObservationLevelError
+	if errors.Is(err, context.Canceled) {
+		level = langfuse.ObservationLevelWarning
+	}
 	span.End(
 		langfuse.WithAgentStatus(err.Error()),
-		langfuse.WithAgentLevel(langfuse.ObservationLevelError),
+		langfuse.WithAgentLevel(level),
 	)
 	return err
 }
 
 func wrapErrorEndEvaluatorSpan(ctx context.Context, span langfuse.Evaluator, msg string, err error) error {
-	logrus.WithContext(ctx).WithError(err).Error(msg)
+	obs.LogErrorOrCancel(logrus.WithContext(ctx), err, msg)
 	err = fmt.Errorf("%s: %w", msg, err)
+
+	level := langfuse.ObservationLevelError
+	if errors.Is(err, context.Canceled) {
+		level = langfuse.ObservationLevelWarning
+	}
 	span.End(
 		langfuse.WithEvaluatorStatus(err.Error()),
-		langfuse.WithEvaluatorLevel(langfuse.ObservationLevelError),
+		langfuse.WithEvaluatorLevel(level),
 	)
 	return err
 }
@@ -92,6 +104,7 @@ func (fp *flowProvider) GetAskAdviceHandler(ctx context.Context, taskID, subtask
 				"SummarizationToolName":   cast.SummarizationToolName,
 				"SummarizedContentPrefix": strings.ReplaceAll(csum.SummarizedContentPrefix, "\n", "\\n"),
 				"ExecutionContext":        executionContext,
+				"Cwd":                     docker.WorkFolderPathInContainer,
 				"Lang":                    fp.language,
 				"CurrentTime":             getCurrentTime(),
 				"ToolPlaceholder":         ToolPlaceholder,
@@ -101,6 +114,7 @@ func (fp *flowProvider) GetAskAdviceHandler(ctx context.Context, taskID, subtask
 				"FileToolName":            tools.FileToolName,
 				"TerminalToolName":        tools.TerminalToolName,
 				"BrowserToolName":         tools.BrowserToolName,
+				"UserFiles":               fp.userFilesListing(),
 			},
 		}
 
@@ -175,6 +189,7 @@ func (fp *flowProvider) GetAskAdviceHandler(ctx context.Context, taskID, subtask
 				"DockerImage":               fp.image,
 				"Cwd":                       docker.WorkFolderPathInContainer,
 				"ContainerPorts":            fp.getContainerPortsDescription(),
+				"UserFiles":                 fp.userFilesListing(),
 			},
 		}
 
@@ -270,6 +285,8 @@ func (fp *flowProvider) GetCoderHandler(ctx context.Context, taskID, subtaskID *
 				"AdviceToolName":          tools.AdviceToolName,
 				"MemoristToolName":        tools.MemoristToolName,
 				"MaintenanceToolName":     tools.MaintenanceToolName,
+				"TerminalToolName":        tools.TerminalToolName,
+				"FileToolName":            tools.FileToolName,
 				"SummarizationToolName":   cast.SummarizationToolName,
 				"SummarizedContentPrefix": strings.ReplaceAll(csum.SummarizedContentPrefix, "\n", "\\n"),
 				"DockerImage":             fp.image,
@@ -279,6 +296,7 @@ func (fp *flowProvider) GetCoderHandler(ctx context.Context, taskID, subtaskID *
 				"Lang":                    fp.language,
 				"CurrentTime":             getCurrentTime(),
 				"ToolPlaceholder":         ToolPlaceholder,
+				"UserFiles":               fp.userFilesListing(),
 			},
 		}
 
@@ -364,6 +382,8 @@ func (fp *flowProvider) GetInstallerHandler(ctx context.Context, taskID, subtask
 				"SearchToolName":            tools.SearchToolName,
 				"AdviceToolName":            tools.AdviceToolName,
 				"MemoristToolName":          tools.MemoristToolName,
+				"TerminalToolName":          tools.TerminalToolName,
+				"FileToolName":              tools.FileToolName,
 				"SummarizationToolName":     cast.SummarizationToolName,
 				"SummarizedContentPrefix":   strings.ReplaceAll(csum.SummarizedContentPrefix, "\n", "\\n"),
 				"DockerImage":               fp.image,
@@ -373,6 +393,7 @@ func (fp *flowProvider) GetInstallerHandler(ctx context.Context, taskID, subtask
 				"Lang":                      fp.language,
 				"CurrentTime":               getCurrentTime(),
 				"ToolPlaceholder":           ToolPlaceholder,
+				"UserFiles":                 fp.userFilesListing(),
 			},
 		}
 
@@ -507,6 +528,7 @@ func (fp *flowProvider) GetMemoristHandler(ctx context.Context, taskID, subtaskI
 				"Lang":                    fp.language,
 				"CurrentTime":             getCurrentTime(),
 				"ToolPlaceholder":         ToolPlaceholder,
+				"UserFiles":               fp.userFilesListing(),
 			},
 		}
 
@@ -590,6 +612,7 @@ func (fp *flowProvider) GetPentesterHandler(ctx context.Context, taskID, subtask
 			},
 			"system": {
 				"HackResultToolName":      tools.HackResultToolName,
+				"WebSearchToolName":       tools.WebSearchToolName,
 				"SearchGuideToolName":     tools.SearchGuideToolName,
 				"StoreGuideToolName":      tools.StoreGuideToolName,
 				"GraphitiEnabled":         fp.graphitiClient != nil && fp.graphitiClient.IsEnabled(),
@@ -599,6 +622,8 @@ func (fp *flowProvider) GetPentesterHandler(ctx context.Context, taskID, subtask
 				"AdviceToolName":          tools.AdviceToolName,
 				"MemoristToolName":        tools.MemoristToolName,
 				"MaintenanceToolName":     tools.MaintenanceToolName,
+				"TerminalToolName":        tools.TerminalToolName,
+				"FileToolName":            tools.FileToolName,
 				"SummarizationToolName":   cast.SummarizationToolName,
 				"SummarizedContentPrefix": strings.ReplaceAll(csum.SummarizedContentPrefix, "\n", "\\n"),
 				"IsDefaultDockerImage":    strings.HasPrefix(strings.ToLower(fp.image), pentestDockerImage),
@@ -609,6 +634,7 @@ func (fp *flowProvider) GetPentesterHandler(ctx context.Context, taskID, subtask
 				"Lang":                    fp.language,
 				"CurrentTime":             getCurrentTime(),
 				"ToolPlaceholder":         ToolPlaceholder,
+				"UserFiles":               fp.userFilesListing(),
 			},
 		}
 
@@ -696,9 +722,11 @@ func (fp *flowProvider) GetSubtaskSearcherHandler(ctx context.Context, taskID, s
 				"SummarizationToolName":   cast.SummarizationToolName,
 				"SummarizedContentPrefix": strings.ReplaceAll(csum.SummarizedContentPrefix, "\n", "\\n"),
 				"ExecutionContext":        executionContext,
+				"Cwd":                     docker.WorkFolderPathInContainer,
 				"Lang":                    fp.language,
 				"CurrentTime":             getCurrentTime(),
 				"ToolPlaceholder":         ToolPlaceholder,
+				"UserFiles":               fp.userFilesListing(),
 			},
 		}
 
@@ -785,9 +813,11 @@ func (fp *flowProvider) GetTaskSearcherHandler(ctx context.Context, taskID int64
 				"SummarizationToolName":   cast.SummarizationToolName,
 				"SummarizedContentPrefix": strings.ReplaceAll(csum.SummarizedContentPrefix, "\n", "\\n"),
 				"ExecutionContext":        executionContext,
+				"Cwd":                     docker.WorkFolderPathInContainer,
 				"Lang":                    fp.language,
 				"CurrentTime":             getCurrentTime(),
 				"ToolPlaceholder":         ToolPlaceholder,
+				"UserFiles":               fp.userFilesListing(),
 			},
 		}
 
@@ -854,6 +884,14 @@ func (fp *flowProvider) GetSummarizeResultHandler(taskID, subtaskID *int64) tool
 		ctx, span := obs.Observer.NewSpan(ctx, obs.SpanKindInternal, "providers.flowProvider.getSummarizeResultHandler")
 		defer span.End()
 
+		// Return cached summary for identical input without calling the LLM.
+		cacheKey := sha256.Sum256([]byte(result))
+		if fp.summarizerCache != nil {
+			if cached, ok := fp.summarizerCache.Get(cacheKey); ok {
+				return cached, nil
+			}
+		}
+
 		ctx, observation := obs.Observer.NewObservation(ctx)
 		summarizerAgent := observation.Agent(
 			langfuse.WithAgentName("chain summarizer"),
@@ -898,6 +936,10 @@ func (fp *flowProvider) GetSummarizeResultHandler(taskID, subtaskID *int64) tool
 			langfuse.WithAgentOutput(summary),
 			langfuse.WithAgentLevel(langfuse.ObservationLevelDebug),
 		)
+
+		if fp.summarizerCache != nil {
+			fp.summarizerCache.Add(cacheKey, summary)
+		}
 
 		return summary, nil
 	}

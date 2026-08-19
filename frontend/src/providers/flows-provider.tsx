@@ -1,19 +1,19 @@
-import { NetworkStatus } from '@apollo/client';
-import { createContext, useCallback, useContext, useEffect, useMemo } from 'react';
+import { useMutation, useQuery, useSubscription } from '@apollo/client/react';
+import { createContext, useCallback, useContext, useMemo } from 'react';
 import { toast } from 'sonner';
 
 import type { FlowFormValues } from '@/features/flows/flow-form';
 import type { FlowFragmentFragment, FlowsQuery } from '@/graphql/types';
 
 import {
-    useCreateAssistantMutation,
-    useCreateFlowMutation,
-    useDeleteFlowMutation,
-    useFinishFlowMutation,
-    useFlowCreatedSubscription,
-    useFlowDeletedSubscription,
-    useFlowsQuery,
-    useFlowUpdatedSubscription,
+    CreateAssistantDocument,
+    CreateFlowDocument,
+    DeleteFlowDocument,
+    FinishFlowDocument,
+    FlowCreatedDocument,
+    FlowDeletedDocument,
+    FlowsDocument,
+    FlowUpdatedDocument,
 } from '@/graphql/types';
 import { Log } from '@/lib/log';
 
@@ -28,6 +28,7 @@ interface FlowsContextValue {
     flowsData: FlowsQuery | undefined;
     flowsError: Error | undefined;
     isLoading: boolean;
+    refetch: () => unknown;
 }
 
 const FlowsContext = createContext<FlowsContextValue | undefined>(undefined);
@@ -36,43 +37,34 @@ interface FlowsProviderProps {
     children: React.ReactNode;
 }
 
-export const FlowsProvider = ({ children }: FlowsProviderProps) => {
-    // Query for flows list
+export function FlowsProvider({ children }: FlowsProviderProps) {
     const {
         data: flowsData,
         error: flowsError,
         loading,
-        networkStatus,
-    } = useFlowsQuery({
+        refetch,
+    } = useQuery(FlowsDocument, {
         notifyOnNetworkStatusChange: true,
     });
 
-    const isLoading = loading && networkStatus === NetworkStatus.loading;
     const flows = useMemo(() => flowsData?.flows ?? [], [flowsData?.flows]);
+    // Full-page spinner only while there's nothing to show yet: a background refetch
+    // (reconnect sweep) keeps the rendered list, and a retry after a failed initial load
+    // shows the spinner rather than flashing the "No flows found" empty state.
+    const isLoading = loading && flows.length === 0;
 
-    useFlowCreatedSubscription();
-    useFlowDeletedSubscription();
-    useFlowUpdatedSubscription();
+    useSubscription(FlowCreatedDocument);
+    useSubscription(FlowDeletedDocument);
+    useSubscription(FlowUpdatedDocument);
 
-    // Show toast notification when flows loading error occurs
-    useEffect(() => {
-        if (flowsError) {
-            toast.error('Error loading flows', {
-                description: flowsError.message,
-            });
-            Log.error('Error loading flows:', flowsError);
-        }
-    }, [flowsError]);
-
-    // Mutations
-    const [createFlowMutation] = useCreateFlowMutation();
-    const [createAssistantMutation] = useCreateAssistantMutation();
-    const [deleteFlowMutation] = useDeleteFlowMutation();
-    const [finishFlowMutation] = useFinishFlowMutation();
+    const [createFlowMutation] = useMutation(CreateFlowDocument);
+    const [createAssistantMutation] = useMutation(CreateAssistantDocument);
+    const [deleteFlowMutation] = useMutation(DeleteFlowDocument);
+    const [finishFlowMutation] = useMutation(FinishFlowDocument);
 
     const createFlow = useCallback(
         async (values: FlowFormValues) => {
-            const { message, providerName } = values;
+            const { message, providerName, resourceIds } = values;
 
             const input = message.trim();
             const modelProvider = providerName.trim();
@@ -86,6 +78,7 @@ export const FlowsProvider = ({ children }: FlowsProviderProps) => {
                     variables: {
                         input,
                         modelProvider,
+                        resourceIds: resourceIds?.length ? resourceIds : undefined,
                     },
                 });
 
@@ -109,7 +102,7 @@ export const FlowsProvider = ({ children }: FlowsProviderProps) => {
 
     const createFlowWithAssistant = useCallback(
         async (values: FlowFormValues) => {
-            const { message, providerName, useAgents } = values;
+            const { message, providerName, resourceIds, useAgents } = values;
 
             const input = message.trim();
             const modelProvider = providerName.trim();
@@ -124,6 +117,7 @@ export const FlowsProvider = ({ children }: FlowsProviderProps) => {
                         flowId: '0',
                         input,
                         modelProvider,
+                        resourceIds: resourceIds?.length ? resourceIds : undefined,
                         useAgents,
                     },
                 });
@@ -204,7 +198,6 @@ export const FlowsProvider = ({ children }: FlowsProviderProps) => {
                 await finishFlowMutation({
                     variables: { flowId },
                 });
-                // Cache will be automatically updated via mutation policy and flowUpdated subscription
 
                 toast.success('Flow finished successfully', {
                     description: flowDescription,
@@ -236,14 +229,15 @@ export const FlowsProvider = ({ children }: FlowsProviderProps) => {
             flowsData,
             flowsError,
             isLoading,
+            refetch,
         }),
-        [createFlow, createFlowWithAssistant, deleteFlow, finishFlow, flows, flowsData, flowsError, isLoading],
+        [createFlow, createFlowWithAssistant, deleteFlow, finishFlow, flows, flowsData, flowsError, isLoading, refetch],
     );
 
     return <FlowsContext.Provider value={value}>{children}</FlowsContext.Provider>;
-};
+}
 
-export const useFlows = () => {
+export function useFlows() {
     const context = useContext(FlowsContext);
 
     if (context === undefined) {
@@ -251,4 +245,4 @@ export const useFlows = () => {
     }
 
     return context;
-};
+}

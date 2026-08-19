@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"encoding/gob"
 	"net"
 	"net/http"
@@ -16,6 +17,8 @@ import (
 	"pentagi/pkg/config"
 	"pentagi/pkg/controller"
 	"pentagi/pkg/database"
+	"pentagi/pkg/database/knowledge"
+	"pentagi/pkg/docker"
 	"pentagi/pkg/graph/subscriptions"
 	"pentagi/pkg/providers"
 	"pentagi/pkg/server/auth"
@@ -34,6 +37,9 @@ import (
 	"github.com/sirupsen/logrus"
 	ginSwagger "github.com/swaggo/gin-swagger"
 	"github.com/swaggo/gin-swagger/swaggerFiles"
+	"github.com/vxcontrol/cloud/anonymizer"
+	"github.com/vxcontrol/cloud/anonymizer/patterns"
+	"github.com/vxcontrol/langchaingo/vectorstores/pgvector"
 )
 
 const baseURL = "/api/v1"
@@ -49,6 +55,8 @@ var frontendRoutes = []string{
 	"/flows",
 	"/settings",
 	"/templates",
+	"/resources",
+	"/knowledges",
 	"/dashboard",
 }
 
@@ -79,6 +87,7 @@ func NewRouter(
 	providers providers.ProviderController,
 	controller controller.FlowController,
 	subscriptions subscriptions.SubscriptionsController,
+	dockerClient docker.DockerClient,
 ) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	if cfg.Debug {
@@ -89,7 +98,7 @@ func NewRouter(
 
 	tokenCache := auth.NewTokenCache(orm)
 	userCache := auth.NewUserCache(orm)
-	authMiddleware := auth.NewAuthMiddleware(baseURL, cfg.CookieSigningSalt, tokenCache, userCache)
+	authMiddleware := auth.NewAuthMiddleware(baseURL, cfg.AuthSalt(), tokenCache, userCache)
 	oauthClients := make(map[string]oauth.OAuthClient)
 	oauthLoginCallbackURL := "/auth/login-callback"
 
@@ -116,12 +125,54 @@ func NewRouter(
 		oauthClients[githubClient.ProviderName()] = githubClient
 	}
 
+	// ---- Knowledge (pgvector) store -----------------------------------------
+	// Shared by both the GraphQL and REST layers.
+	// Store and embedder are nil when no embedding provider is configured;
+	// the knowledge store handles that gracefully (embedding-dependent ops error).
+	embedder := providers.Embedder()
+	var pgStore *pgvector.Store
+	if embedder.IsAvailable() {
+		opts := []pgvector.Option{
+			pgvector.WithEmbedder(embedder),
+			pgvector.WithCollectionName("langchain"),
+		}
+		if cfg.PgxPool != nil {
+			opts = append(opts, pgvector.WithConn(cfg.PgxPool))
+		} else {
+			opts = append(opts, pgvector.WithConnectionURL(cfg.DatabaseURL))
+		}
+		if s, err := pgvector.New(context.Background(), opts...); err == nil {
+			pgStore = &s
+		} else {
+			logrus.WithError(err).Warn("failed to initialise pgvector store for knowledge API; embedding operations will be unavailable")
+		}
+	}
+	var knowledgeStore knowledge.KnowledgeStore
+	knowledgeStore = knowledge.NewKnowledgeStore(db, pgStore, embedder, subscriptions.NewKnowledgePublisher, cfg.EmbeddingMaxTextBytes)
+
+	// ---- Anonymizer replacer ------------------------------------------------
+	// Shared singleton used by the GraphQL anonymizeText mutation.
+	// Falls back to a no-op nil replacer on failure so the rest of the server still starts correctly.
+	var textReplacer anonymizer.Replacer
+	if allPatterns, err := patterns.LoadPatterns(patterns.PatternListTypeAll); err != nil {
+		logrus.WithError(err).Warn("failed to load anonymizer patterns; anonymizeText mutation will be unavailable")
+	} else {
+		allPatterns.Patterns = append(allPatterns.Patterns, cfg.GetSecretPatterns()...)
+
+		if r, err := anonymizer.NewReplacer(allPatterns.Regexes(), allPatterns.Names()); err != nil {
+			logrus.WithError(err).Warn("failed to create anonymizer replacer; anonymizeText mutation will be unavailable")
+		} else {
+			textReplacer = r
+		}
+	}
+
 	// services
 	authService := services.NewAuthService(
 		services.AuthServiceConfig{
 			BaseURL:          baseURL,
 			LoginCallbackURL: oauthLoginCallbackURL,
 			SessionTimeout:   4 * 60 * 60, // 4 hours
+			CookiePrefix:     cfg.TenantPrefix(),
 		},
 		orm,
 		oauthClients,
@@ -129,10 +180,14 @@ func NewRouter(
 	userService := services.NewUserService(orm, userCache)
 	roleService := services.NewRoleService(orm)
 	providerService := services.NewProviderService(providers)
+	settingsService := services.NewSettingsService(cfg)
 	flowService := services.NewFlowService(orm, providers, controller, subscriptions)
+	flowFileService := services.NewFlowFileService(orm, cfg.DataDir, cfg.TenantPrefix(), dockerClient, subscriptions)
+	resourceService := services.NewResourceService(orm, cfg.DataDir, subscriptions)
 	taskService := services.NewTaskService(orm)
 	subtaskService := services.NewSubtaskService(orm)
 	containerService := services.NewContainerService(orm)
+	toolcallService := services.NewToolcallService(orm)
 	assistantService := services.NewAssistantService(orm, providers, controller, subscriptions)
 	agentlogService := services.NewAgentlogService(orm)
 	assistantlogService := services.NewAssistantlogService(orm)
@@ -143,9 +198,11 @@ func NewRouter(
 	screenshotService := services.NewScreenshotService(orm, cfg.DataDir)
 	promptService := services.NewPromptService(orm)
 	analyticsService := services.NewAnalyticsService(orm)
-	tokenService := services.NewTokenService(orm, cfg.CookieSigningSalt, tokenCache, subscriptions)
+	tokenService := services.NewTokenService(orm, cfg.AuthSalt(), tokenCache, subscriptions)
+	knowledgeService := services.NewKnowledgeService(orm, knowledgeStore)
+	anonymizerService := services.NewAnonymizerService(textReplacer)
 	graphqlService := services.NewGraphqlService(
-		db, cfg, baseURL, cfg.CorsOrigins, tokenCache, providers, controller, subscriptions,
+		db, cfg, baseURL, cfg.CorsOrigins, tokenCache, providers, controller, subscriptions, knowledgeStore, textReplacer,
 	)
 
 	router := gin.Default()
@@ -182,8 +239,13 @@ func NewRouter(
 	router.Use(gin.Recovery())
 	router.Use(logger.WithGinLogger("pentagi-api"))
 
-	cookieStore := cookie.NewStore(auth.MakeCookieStoreKey(cfg.CookieSigningSalt)...)
-	router.Use(sessions.Sessions("auth", cookieStore))
+	// AuthSalt mixes TENANT_ID into the key derivation so a session minted by one
+	// instance is cryptographically invalid on another even when COOKIE_SIGNING_SALT
+	// is shared. ScopedName separates the cookie itself, because cookies are scoped
+	// by host and NOT by port — two instances on one host would otherwise overwrite
+	// each other's sessions. Both are identity operations when TENANT_ID is empty.
+	cookieStore := cookie.NewStore(auth.MakeCookieStoreKey(cfg.AuthSalt())...)
+	router.Use(sessions.Sessions(cfg.ScopedName("auth"), cookieStore))
 
 	api := router.Group(baseURL)
 	api.Use(noCacheMiddleware())
@@ -193,6 +255,12 @@ func NewRouter(
 	changePasswordGroup.Use(authMiddleware.AuthUserRequired)
 	changePasswordGroup.Use(localUserRequired())
 	changePasswordGroup.PUT("/password", userService.ChangePasswordCurrentUser)
+	changePasswordGroup.PUT("/email", userService.ChangeEmailCurrentUser)
+
+	// Unlike password/email, the display name is editable by OAuth users too — no localUserRequired.
+	changeNameGroup := api.Group("/user")
+	changeNameGroup.Use(authMiddleware.AuthUserRequired)
+	changeNameGroup.PUT("/name", userService.ChangeNameCurrentUser)
 
 	publicGroup := api.Group("/")
 	publicGroup.Use(authMiddleware.TryAuth)
@@ -221,11 +289,16 @@ func NewRouter(
 	{
 		setGraphqlGroup(privateGroup, graphqlService)
 
+		setKnowledgeGroup(privateGroup, knowledgeService)
 		setProvidersGroup(privateGroup, providerService)
+		setSettingsGroup(privateGroup, settingsService)
 		setFlowsGroup(privateGroup, flowService)
+		setFlowFilesGroup(privateGroup, flowFileService)
+		setResourcesGroup(privateGroup, resourceService)
 		setTasksGroup(privateGroup, taskService)
 		setSubtasksGroup(privateGroup, subtaskService)
 		setContainersGroup(privateGroup, containerService)
+		setToolcallsGroup(privateGroup, toolcallService)
 		setAssistantsGroup(privateGroup, assistantService)
 		setAgentlogsGroup(privateGroup, agentlogService)
 		setAssistantlogsGroup(privateGroup, assistantlogService)
@@ -235,6 +308,7 @@ func NewRouter(
 		setVecstorelogsGroup(privateGroup, vecstorelogService)
 		setScreenshotsGroup(privateGroup, screenshotService)
 		setPromptsGroup(privateGroup, promptService)
+		setAnonymizeGroup(privateGroup, anonymizerService)
 		setAnalyticsGroup(privateGroup, analyticsService)
 	}
 
@@ -275,42 +349,80 @@ func NewRouter(
 			}
 		}())
 	} else {
-		router.Use(static.Serve("/", static.LocalFile(cfg.StaticDir, true)))
-
-		indexExists := true
-		indexPath := filepath.Join(cfg.StaticDir, "index.html")
-		if _, err := os.Stat(indexPath); err != nil {
-			indexExists = false
-		}
-
-		router.NoRoute(func(c *gin.Context) {
-			if c.Request.Method == "GET" && !strings.HasPrefix(c.Request.URL.Path, baseURL) {
-				isFrontendRoute := false
-				path := c.Request.URL.Path
-				for _, prefix := range frontendRoutes {
-					if path == prefix || strings.HasPrefix(path, prefix+"/") {
-						isFrontendRoute = true
-						break
-					}
-				}
-
-				if isFrontendRoute && indexExists {
-					c.File(indexPath)
-					return
-				}
-			}
-
-			c.Redirect(http.StatusMovedPermanently, "/")
-		})
+		registerStaticFileServer(router, cfg.StaticDir)
 	}
 
 	return router
+}
+
+// registerStaticFileServer serves the locally-built SPA (used when no STATIC_URL
+// upstream is set): cache headers, hashed assets via static.Serve, and an SPA
+// fallback that serves index.html for client routes but returns 404 for a missing
+// /assets/* — so the module loader fails cleanly and the app can reload to recover
+// instead of getting index.html and a MIME error. Split out to be unit-testable.
+func registerStaticFileServer(router *gin.Engine, staticDir string) {
+	router.Use(staticCacheMiddleware())
+	router.Use(static.Serve("/", static.LocalFile(staticDir, true)))
+
+	indexExists := true
+	indexPath := filepath.Join(staticDir, "index.html")
+	if _, err := os.Stat(indexPath); err != nil {
+		indexExists = false
+	}
+
+	router.NoRoute(func(c *gin.Context) {
+		if c.Request.Method == http.MethodGet && !strings.HasPrefix(c.Request.URL.Path, baseURL) {
+			isFrontendRoute := false
+			path := c.Request.URL.Path
+			for _, prefix := range frontendRoutes {
+				if path == prefix || strings.HasPrefix(path, prefix+"/") {
+					isFrontendRoute = true
+					break
+				}
+			}
+
+			if isFrontendRoute && indexExists {
+				c.File(indexPath)
+				return
+			}
+
+			if strings.HasPrefix(path, "/assets/") {
+				// A missing hashed asset may be a transient rolling-deploy
+				// race, so override the immutable directive set above —
+				// never cache this 404 as a permanent negative.
+				c.Header("Cache-Control", "no-store")
+				c.Status(http.StatusNotFound)
+				return
+			}
+		}
+
+		c.Redirect(http.StatusMovedPermanently, "/")
+	})
+}
+
+func setKnowledgeGroup(parent *gin.RouterGroup, svc *services.KnowledgeService) {
+	kg := parent.Group("/knowledge")
+	{
+		kg.GET("/", svc.ListDocuments)
+		kg.GET("/:id", svc.GetDocument)
+		kg.POST("/", svc.CreateDocument)
+		kg.POST("/search", svc.SearchDocuments)
+		kg.PUT("/:id", svc.UpdateDocument)
+		kg.DELETE("/:id", svc.DeleteDocument)
+	}
 }
 
 func setProvidersGroup(parent *gin.RouterGroup, svc *services.ProviderService) {
 	providersGroup := parent.Group("/providers")
 	{
 		providersGroup.GET("/", svc.GetProviders)
+	}
+}
+
+func setSettingsGroup(parent *gin.RouterGroup, svc *services.SettingsService) {
+	settingsGroup := parent.Group("/settings")
+	{
+		settingsGroup.GET("/", svc.GetSettings)
 	}
 }
 
@@ -367,6 +479,33 @@ func setFlowsGroup(parent *gin.RouterGroup, svc *services.FlowService) {
 	}
 }
 
+func setFlowFilesGroup(parent *gin.RouterGroup, svc *services.FlowFileService) {
+	flowFilesGroup := parent.Group("/flows/:flowID/files")
+	{
+		flowFilesGroup.GET("/", svc.GetFlowFiles)
+		flowFilesGroup.GET("/container", svc.GetFlowContainerFiles)
+		flowFilesGroup.POST("/", svc.UploadFlowFiles)
+		flowFilesGroup.DELETE("/", svc.DeleteFlowFile)
+		flowFilesGroup.GET("/download", svc.DownloadFlowFile)
+		flowFilesGroup.POST("/pull", svc.PullFlowFiles)
+		flowFilesGroup.POST("/resources", svc.AddResourcesToFlow)
+		flowFilesGroup.POST("/to-resources", svc.AddResourceFromFlow)
+	}
+}
+
+func setResourcesGroup(parent *gin.RouterGroup, svc *services.ResourceService) {
+	rg := parent.Group("/resources")
+	{
+		rg.GET("/", svc.ListResources)
+		rg.POST("/", svc.UploadResources)
+		rg.POST("/mkdir", svc.MkdirResource)
+		rg.PUT("/move", svc.MoveResource)
+		rg.POST("/copy", svc.CopyResource)
+		rg.DELETE("/", svc.DeleteResource)
+		rg.GET("/download", svc.DownloadResource)
+	}
+}
+
 func setContainersGroup(parent *gin.RouterGroup, svc *services.ContainerService) {
 	containersViewGroup := parent.Group("/containers")
 	{
@@ -377,6 +516,19 @@ func setContainersGroup(parent *gin.RouterGroup, svc *services.ContainerService)
 	{
 		flowContainersViewGroup.GET("/", svc.GetFlowContainers)
 		flowContainersViewGroup.GET("/:containerID", svc.GetFlowContainer)
+	}
+}
+
+func setToolcallsGroup(parent *gin.RouterGroup, svc *services.ToolcallService) {
+	toolcallsViewGroup := parent.Group("/toolcalls")
+	{
+		toolcallsViewGroup.GET("/", svc.GetToolcalls)
+	}
+
+	flowToolcallsViewGroup := parent.Group("/flows/:flowID/toolcalls")
+	{
+		flowToolcallsViewGroup.GET("/", svc.GetFlowToolcalls)
+		flowToolcallsViewGroup.GET("/:toolcallID", svc.GetFlowToolcall)
 	}
 }
 
@@ -486,6 +638,13 @@ func setScreenshotsGroup(parent *gin.RouterGroup, svc *services.ScreenshotServic
 		flowScreenshotsViewGroup.GET("/", svc.GetFlowScreenshots)
 		flowScreenshotsViewGroup.GET("/:screenshotID", svc.GetFlowScreenshot)
 		flowScreenshotsViewGroup.GET("/:screenshotID/file", svc.GetFlowScreenshotFile)
+	}
+}
+
+func setAnonymizeGroup(parent *gin.RouterGroup, svc *services.AnonymizerService) {
+	group := parent.Group("/anonymize")
+	{
+		group.POST("/text", svc.AnonymizeText)
 	}
 }
 

@@ -9,7 +9,7 @@ export enum BreakpointName {
 export const breakpoints = {
     [BreakpointName.desktop]: Infinity,
     [BreakpointName.mobile]: 768,
-    [BreakpointName.tablet]: 1200,
+    [BreakpointName.tablet]: 1280,
 } as const;
 
 const breakpointRules: { maxWidth: number; name: BreakpointName }[] = [
@@ -24,7 +24,7 @@ const getBreakpoint = (width: number): BreakpointName => {
     return breakpoint?.name ?? BreakpointName.desktop;
 };
 
-export const useBreakpoint = () => {
+export function useBreakpoint() {
     const [breakpoint, setBreakpoint] = useState<BreakpointName>(() => {
         if (typeof window === 'undefined') {
             return BreakpointName.desktop;
@@ -36,7 +36,6 @@ export const useBreakpoint = () => {
     const prevWidthRef = useRef<number>(typeof window !== 'undefined' ? window.innerWidth : 0);
     const breakpointRef = useRef<BreakpointName>(breakpoint);
 
-    // Move state update logic outside of useEffect
     const updateBreakpointState = useCallback((newBreakpoint: BreakpointName) => {
         if (breakpointRef.current !== newBreakpoint) {
             breakpointRef.current = newBreakpoint;
@@ -60,7 +59,7 @@ export const useBreakpoint = () => {
         };
 
         window.addEventListener('resize', handleResize);
-        handleResize(); // Check on mount
+        handleResize();
 
         return () => window.removeEventListener('resize', handleResize);
     }, [updateBreakpointState]);
@@ -71,4 +70,4 @@ export const useBreakpoint = () => {
         isMobile: breakpoint === BreakpointName.mobile,
         isTablet: breakpoint === BreakpointName.tablet,
     };
-};
+}

@@ -1,8 +1,8 @@
 import { zodResolver } from '@hookform/resolvers/zod';
-import debounce from 'lodash/debounce';
 import { Camera, ChevronDown, Search, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useForm } from 'react-hook-form';
+import { useDebouncedCallback } from 'use-debounce';
 import { z } from 'zod';
 
 import { Button } from '@/components/ui/button';
@@ -18,7 +18,7 @@ const searchFormSchema = z.object({
     search: z.string(),
 });
 
-const FlowScreenshots = () => {
+function FlowScreenshots() {
     const { flowData, flowId } = useFlow();
 
     const screenshots = useMemo(() => flowData?.screenshots ?? [], [flowData?.screenshots]);
@@ -38,16 +38,10 @@ const FlowScreenshots = () => {
 
     const searchValue = form.watch('search');
 
-    // Create debounced function to update search value
-    const debouncedUpdateSearch = useMemo(
-        () =>
-            debounce((value: string) => {
-                setDebouncedSearchValue(value);
-            }, 500),
-        [],
-    );
+    const debouncedUpdateSearch = useDebouncedCallback((value: string) => {
+        setDebouncedSearchValue(value);
+    }, 500);
 
-    // Update debounced search value when input value changes
     useEffect(() => {
         debouncedUpdateSearch(searchValue);
 
@@ -56,22 +50,18 @@ const FlowScreenshots = () => {
         };
     }, [searchValue, debouncedUpdateSearch]);
 
-    // Cleanup debounced function on unmount
     useEffect(() => {
         return () => {
             debouncedUpdateSearch.cancel();
         };
     }, [debouncedUpdateSearch]);
 
-    // Clear search when flow changes to prevent stale search state
     useEffect(() => {
         form.reset({ search: '' });
         setDebouncedSearchValue('');
         debouncedUpdateSearch.cancel();
     }, [flowId, form, debouncedUpdateSearch]);
 
-    // Memoize filtered screenshots to avoid recomputing on every render
-    // Use debouncedSearchValue for filtering to improve performance
     const filteredScreenshots = useMemo(() => {
         const search = debouncedSearchValue.toLowerCase().trim();
 
@@ -109,6 +99,7 @@ const FlowScreenshots = () => {
                                         {field.value && (
                                             <InputGroupAddon align="inline-end">
                                                 <InputGroupButton
+                                                    aria-label="Clear screenshot search"
                                                     onClick={() => {
                                                         form.reset({ search: '' });
                                                         setDebouncedSearchValue('');
@@ -145,6 +136,7 @@ const FlowScreenshots = () => {
 
                     {!isScrolledToBottom && (
                         <Button
+                            aria-label="Scroll to latest screenshot"
                             className="absolute right-4 bottom-4 z-10 shadow-md hover:shadow-lg"
                             onClick={() => scrollToEnd()}
                             size="icon-sm"
@@ -171,6 +163,6 @@ const FlowScreenshots = () => {
             )}
         </div>
     );
-};
+}
 
 export default FlowScreenshots;

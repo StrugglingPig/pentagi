@@ -1,9 +1,9 @@
 import { zodResolver } from '@hookform/resolvers/zod';
 import '@xterm/xterm/css/xterm.css';
-import debounce from 'lodash/debounce';
 import { ChevronDown, ChevronUp, ListFilter, Search, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useForm } from 'react-hook-form';
+import { useDebouncedCallback } from 'use-debounce';
 import { z } from 'zod';
 
 import Terminal from '@/components/shared/terminal';
@@ -26,11 +26,10 @@ const searchFormSchema = z.object({
     search: z.string(),
 });
 
-const FlowTerminal = () => {
+function FlowTerminal() {
     const { flowData, flowId } = useFlow();
 
     const terminalLogs = useMemo(() => flowData?.terminalLogs ?? [], [flowData?.terminalLogs]);
-    // Separate state for immediate input value and debounced search value
     const [debouncedSearchValue, setDebouncedSearchValue] = useState('');
     const terminalRef = useRef<null | { findNext: () => void; findPrevious: () => void }>(null);
 
@@ -48,16 +47,10 @@ const FlowTerminal = () => {
     const searchValue = form.watch('search');
     const filter = form.watch('filter');
 
-    // Create debounced function to update search value
-    const debouncedUpdateSearch = useMemo(
-        () =>
-            debounce((value: string) => {
-                setDebouncedSearchValue(value);
-            }, 500),
-        [],
-    );
+    const debouncedUpdateSearch = useDebouncedCallback((value: string) => {
+        setDebouncedSearchValue(value);
+    }, 500);
 
-    // Update debounced search value when input value changes
     useEffect(() => {
         debouncedUpdateSearch(searchValue);
 
@@ -66,14 +59,12 @@ const FlowTerminal = () => {
         };
     }, [searchValue, debouncedUpdateSearch]);
 
-    // Cleanup debounced function on unmount
     useEffect(() => {
         return () => {
             debouncedUpdateSearch.cancel();
         };
     }, [debouncedUpdateSearch]);
 
-    // Clear search when flow changes to prevent stale search state
     useEffect(() => {
         form.reset({
             filter: {
@@ -137,7 +128,8 @@ const FlowTerminal = () => {
     };
 
     const handleClearSearch = () => {
-        form.reset({ search: '' });
+        // Clear only the search — form.reset would drop the task/subtask filter too.
+        form.setValue('search', '');
         setDebouncedSearchValue('');
         debouncedUpdateSearch.cancel();
     };
@@ -186,7 +178,7 @@ const FlowTerminal = () => {
                                                         title="Previous match"
                                                         type="button"
                                                     >
-                                                        <ChevronUp className="size-4" />
+                                                        <ChevronUp />
                                                     </InputGroupButton>
                                                     <InputGroupButton
                                                         onClick={handleFindNext}
@@ -194,18 +186,19 @@ const FlowTerminal = () => {
                                                         title="Next match"
                                                         type="button"
                                                     >
-                                                        <ChevronDown className="size-4" />
+                                                        <ChevronDown />
                                                     </InputGroupButton>
                                                 </>
                                             )}
                                             {field.value && (
                                                 <InputGroupButton
+                                                    aria-label="Clear terminal search"
                                                     onClick={handleClearSearch}
                                                     size="icon-xs"
                                                     title="Clear search"
                                                     type="button"
                                                 >
-                                                    <X className="size-4" />
+                                                    <X />
                                                 </InputGroupButton>
                                             )}
                                         </InputGroupAddon>
@@ -256,6 +249,6 @@ const FlowTerminal = () => {
             )}
         </div>
     );
-};
+}
 
 export default FlowTerminal;

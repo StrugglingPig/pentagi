@@ -4,9 +4,11 @@ import { createContext, use, useCallback, useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 
-import type { AuthInfo, AuthInfoResponse } from '@/models/info';
+import type { AuthInfo } from '@/models/info';
+import type { User } from '@/models/user';
 
-import { axios } from '@/lib/axios';
+import { api } from '@/lib/axios';
+import { routes } from '@/lib/routes';
 import { getReturnUrlParam } from '@/lib/utils/auth';
 import { baseUrl } from '@/models/api';
 
@@ -31,6 +33,7 @@ interface UserContextType {
     login: (credentials: LoginCredentials) => Promise<LoginResult>;
     loginWithOAuth: (provider: OAuthProvider) => Promise<LoginResult>;
     logout: (returnUrl?: string) => Promise<void>;
+    patchUser: (patch: Partial<User>) => void;
     refreshAuthInfo: () => Promise<void>;
     setAuth: (authInfo: AuthInfo) => void;
 }
@@ -39,13 +42,12 @@ const UserContext = createContext<undefined | UserContextType>(undefined);
 
 export const AUTH_STORAGE_KEY = 'auth';
 
-export const UserProvider = ({ children }: { children: ReactNode }) => {
+export function UserProvider({ children }: { children: ReactNode }) {
     const navigate = useNavigate();
     const location = useLocation();
     const [authInfo, setAuthInfo] = useState<AuthInfo | null>(null);
     const [isLoading, setIsLoading] = useState(true);
 
-    // Load auth data from localStorage on mount, then load from API if needed
     useEffect(() => {
         const initializeAuth = async () => {
             let shouldFetchFromApi = false;
@@ -59,7 +61,7 @@ export const UserProvider = ({ children }: { children: ReactNode }) => {
                     if (parsedAuthInfo) {
                         setAuthInfo(parsedAuthInfo);
 
-                        // For guest users, always fetch fresh data from API to get updated OAuth providers
+                        // Guests need a fresh /info to pick up updated OAuth providers list.
                         if (parsedAuthInfo.type === 'guest') {
                             shouldFetchFromApi = true;
                         } else {
@@ -72,27 +74,23 @@ export const UserProvider = ({ children }: { children: ReactNode }) => {
                     shouldFetchFromApi = true;
                 }
             } catch {
-                // If parsing fails, clear invalid data
                 localStorage.removeItem(AUTH_STORAGE_KEY);
                 shouldFetchFromApi = true;
             }
 
-            // Load from API for guests or when localStorage is empty
             if (shouldFetchFromApi) {
                 try {
-                    const info: AuthInfoResponse = await axios.get('/info');
+                    const info = await api.get<AuthInfo>('/info');
 
                     if (info?.status === 'success' && info.data) {
-                        // Set authInfo even for guest (contains providers list)
                         setAuthInfo(info.data);
 
-                        // Update localStorage with fresh guest data
                         if (info.data.type === 'guest') {
                             localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(info.data));
                         }
                     }
                 } catch {
-                    // ignore
+                    // swallow: /info is non-critical here, the rest of the app will retry on demand
                 } finally {
                     setIsLoading(false);
                 }
@@ -104,7 +102,6 @@ export const UserProvider = ({ children }: { children: ReactNode }) => {
 
     const setAuth = useCallback((newAuthInfo: AuthInfo) => {
         setAuthInfo(newAuthInfo);
-        // Persist to localStorage
         localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(newAuthInfo));
     }, []);
 
@@ -124,9 +121,20 @@ export const UserProvider = ({ children }: { children: ReactNode }) => {
         return expirationDate > now;
     }, [authInfo]);
 
+    const patchUser = useCallback(
+        (patch: Partial<User>) => {
+            if (!authInfo?.user) {
+                return;
+            }
+
+            setAuth({ ...authInfo, user: { ...authInfo.user, ...patch } });
+        },
+        [authInfo, setAuth],
+    );
+
     const refreshAuthInfo = useCallback(async () => {
         try {
-            const info: AuthInfoResponse = await axios.get('/info');
+            const info = await api.get<AuthInfo>('/info');
 
             if (info?.status === 'success' && info.data) {
                 setAuth(info.data);
@@ -134,13 +142,14 @@ export const UserProvider = ({ children }: { children: ReactNode }) => {
                 clearAuth();
             }
         } catch {
-            clearAuth();
+            // A transient /info failure (network, 5xx, timeout) is not auth loss — the axios
+            // interceptor hard-redirects on a real 401/403. Keep the current session.
         }
     }, [setAuth, clearAuth]);
 
-    // Refresh auth info when on login page to get fresh OAuth providers list
     useEffect(() => {
-        if (location.pathname === '/login' && !isLoading) {
+        if (location.pathname === routes.login() && !isLoading) {
+            // eslint-disable-next-line react-hooks/set-state-in-effect -- refreshAuthInfo's setState runs after an async fetch, not synchronously
             refreshAuthInfo();
         }
     }, [location.pathname, isLoading, refreshAuthInfo]);
@@ -151,13 +160,13 @@ export const UserProvider = ({ children }: { children: ReactNode }) => {
             const finalReturnUrl = returnUrl || getReturnUrlParam(currentPath);
 
             try {
-                await axios.get('/auth/logout');
+                await api.get('/auth/logout');
                 toast.success('Successfully logged out');
             } catch {
                 toast.error('Logout failed, but clearing local session');
             } finally {
                 clearAuth();
-                window.location.href = `/login${finalReturnUrl}`;
+                window.location.href = `${routes.login()}${finalReturnUrl}`;
             }
         },
         [clearAuth, location.pathname],
@@ -166,10 +175,7 @@ export const UserProvider = ({ children }: { children: ReactNode }) => {
     const login = useCallback(
         async (credentials: LoginCredentials): Promise<LoginResult> => {
             try {
-                const loginResponse = await axios.post<unknown, { data?: unknown; error?: string; status: string }>(
-                    '/auth/login',
-                    credentials,
-                );
+                const loginResponse = await api.post<unknown>('/auth/login', credentials);
 
                 if (loginResponse?.status !== 'success') {
                     const errorMessage = 'Invalid login or password';
@@ -178,8 +184,8 @@ export const UserProvider = ({ children }: { children: ReactNode }) => {
                     return { error: errorMessage, success: false };
                 }
 
-                // After login, backend set cookie, so we need to get fresh auth info
-                const infoResponse: AuthInfoResponse = await axios.get('/info');
+                // Backend sets the session cookie on /auth/login — fetch /info to materialize the user.
+                const infoResponse = await api.get<AuthInfo>('/info');
 
                 if (infoResponse?.status !== 'success' || !infoResponse.data) {
                     const errorMessage = 'Failed to load user information';
@@ -188,17 +194,14 @@ export const UserProvider = ({ children }: { children: ReactNode }) => {
                     return { error: errorMessage, success: false };
                 }
 
-                // Save auth info
                 setAuth(infoResponse.data);
 
-                // Check if password change is required for local users
                 if (infoResponse.data.user?.type === 'local' && infoResponse.data.user.password_change_required) {
                     toast.warning('Password change required');
 
                     return { passwordChangeRequired: true, success: true };
                 }
 
-                // toast.success('Successfully logged in');
                 return { success: true };
             } catch {
                 const errorMessage = 'Login failed. Please try again.';
@@ -212,7 +215,7 @@ export const UserProvider = ({ children }: { children: ReactNode }) => {
 
     const loginWithOAuth = useCallback(
         async (provider: OAuthProvider): Promise<LoginResult> => {
-            const returnOAuthUri = '/oauth/result';
+            const returnOAuthUri = routes.oauthResult;
             const width = 500;
             const height = 600;
             const left = window.screenX + (window.outerWidth - width) / 2;
@@ -295,18 +298,16 @@ export const UserProvider = ({ children }: { children: ReactNode }) => {
 
                     if (event.data.status === 'success') {
                         try {
-                            const info: AuthInfoResponse = await axios.get('/info');
+                            const info = await api.get<AuthInfo>('/info');
 
                             if (info?.status === 'success' && info.data?.type === 'user') {
                                 setAuth(info.data);
                                 cleanup();
-                                // toast.success('Successfully logged in');
                                 resolve({ success: true });
 
                                 return;
                             }
                         } catch (error) {
-                            // In case of error, fall through to common handling below
                             console.error('Error during OAuth result handling:', error);
                         }
                     }
@@ -326,23 +327,20 @@ export const UserProvider = ({ children }: { children: ReactNode }) => {
         [setAuth],
     );
 
-    // Update auth state on route changes
     useEffect(() => {
         const updateAuth = async () => {
-            // Skip for public routes
-            const publicRoutes = ['/login', '/oauth/result'];
+            const publicRoutes = [routes.login(), routes.oauthResult];
 
             if (publicRoutes.includes(location.pathname)) {
                 return;
             }
 
-            // Check if user is authenticated
             if (!isAuthenticated()) {
                 return;
             }
 
             try {
-                const info: AuthInfoResponse = await axios.get('/info', {
+                const info = await api.get<AuthInfo>('/info', {
                     params: {
                         refresh_cookie: true,
                     },
@@ -353,14 +351,11 @@ export const UserProvider = ({ children }: { children: ReactNode }) => {
                 } else {
                     clearAuth();
                     toast.error('Session expired. Please login again.');
-                    const returnParam = getReturnUrlParam(location.pathname);
-                    navigate(`/login${returnParam}`);
+                    navigate(routes.login(location.pathname));
                 }
             } catch {
-                clearAuth();
-                toast.error('Session expired. Please login again.');
-                const returnParam = getReturnUrlParam(location.pathname);
-                navigate(`/login${returnParam}`);
+                // A transient /info failure on navigation must not log the user out — a network
+                // blip is not session expiry; the interceptor redirects on a real 401/403.
             }
         };
 
@@ -368,7 +363,6 @@ export const UserProvider = ({ children }: { children: ReactNode }) => {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [location.pathname]);
 
-    // Listen for auth refresh events from Apollo Client
     useEffect(() => {
         const handleAuthRefresh = () => {
             refreshAuthInfo();
@@ -391,6 +385,7 @@ export const UserProvider = ({ children }: { children: ReactNode }) => {
                 login,
                 loginWithOAuth,
                 logout,
+                patchUser,
                 refreshAuthInfo,
                 setAuth,
             }}
@@ -398,9 +393,9 @@ export const UserProvider = ({ children }: { children: ReactNode }) => {
             {children}
         </UserContext>
     );
-};
+}
 
-export const useUser = () => {
+export function useUser() {
     const context = use(UserContext);
 
     if (context === undefined) {
@@ -408,4 +403,4 @@ export const useUser = () => {
     }
 
     return context;
-};
+}

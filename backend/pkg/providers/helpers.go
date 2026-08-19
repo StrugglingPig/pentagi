@@ -44,6 +44,33 @@ type dummyMessage struct {
 	Message string `json:"message"`
 }
 
+// wrapToolCallIDTemplateError annotates an error returned by
+// Provider.GetToolCallIDTemplate so the user sees an actionable hint when a
+// known upstream limitation blocks provider initialization. Currently it
+// covers the Ollama "model does not support tools" case (issue #280): the
+// underlying error is returned by the Ollama API itself and surfaces five
+// wraps deep, which previously left the user with a cryptic "failed to
+// determine tool call ID template" message. This helper is shared by the
+// flow and assistant provider paths, so the wording stays context-neutral.
+//
+// The function preserves the original error chain via %w so downstream code
+// (logs, langfuse spans, errors.Is/As) keeps working.
+func wrapToolCallIDTemplateError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(err.Error(), "does not support tools") {
+		return fmt.Errorf(
+			"failed to determine tool call ID template: the selected model "+
+				"does not support tool/function calling, which PentAGI requires "+
+				"for tool execution in flows and assistant sessions; select an "+
+				"Ollama model whose metadata advertises tool/function calling "+
+				"support and update the provider configuration: %w",
+			err)
+	}
+	return fmt.Errorf("failed to determine tool call ID template: %w", err)
+}
+
 type reflectorRetryContextKey struct{}
 
 // isReflectorRetry checks if we are already in a reflector retry cycle
@@ -523,6 +550,8 @@ func (fp *flowProvider) restoreChain(
 				return wrapErrorWithEvent("failed to normalize tool call IDs", err)
 			}
 
+			ast.SanitizeToolCallArguments()
+
 			if err := ast.ClearReasoning(); err != nil {
 				return wrapErrorWithEvent("failed to clear reasoning", err)
 			}
@@ -589,19 +618,19 @@ func (fp *flowProvider) processChain(
 ) error {
 	msgChain, err := fp.db.GetMsgChain(ctx, msgChainID)
 	if err != nil {
-		logger.WithError(err).Error("failed to get message chain")
+		obs.LogErrorOrCancel(logger, err, "failed to get message chain")
 		return fmt.Errorf("failed to get message chain %d: %w", msgChainID, err)
 	}
 
 	var chain []llms.MessageContent
 	if err := json.Unmarshal(msgChain.Chain, &chain); err != nil {
-		logger.WithError(err).Error("failed to unmarshal message chain")
+		obs.LogErrorOrCancel(logger, err, "failed to unmarshal message chain")
 		return fmt.Errorf("failed to unmarshal message chain %d: %w", msgChainID, err)
 	}
 
 	updatedChain, err := transform(chain)
 	if err != nil {
-		logger.WithError(err).Error("failed to transform chain")
+		obs.LogErrorOrCancel(logger, err, "failed to transform chain")
 		return fmt.Errorf("failed to transform chain: %w", err)
 	}
 
@@ -631,6 +660,8 @@ func (fp *flowProvider) processChain(
 				logger.WithError(err).Warn("failed to normalize tool call IDs")
 			}
 
+			ast.SanitizeToolCallArguments()
+
 			// Clear provider-specific reasoning signatures
 			if err := ast.ClearReasoning(); err != nil {
 				logger.WithError(err).Warn("failed to clear reasoning")
@@ -649,7 +680,7 @@ func (fp *flowProvider) processChain(
 
 	chainBlob, err := json.Marshal(updatedChain)
 	if err != nil {
-		logger.WithError(err).Error("failed to marshal updated chain")
+		obs.LogErrorOrCancel(logger, err, "failed to marshal updated chain")
 		return fmt.Errorf("failed to marshal updated chain %d: %w", msgChainID, err)
 	}
 
@@ -661,7 +692,7 @@ func (fp *flowProvider) processChain(
 		ID:              msgChainID,
 	})
 	if err != nil {
-		logger.WithError(err).Error("failed to update message chain")
+		obs.LogErrorOrCancel(logger, err, "failed to update message chain")
 		return fmt.Errorf("failed to update message chain %d: %w", msgChainID, err)
 	}
 
@@ -830,13 +861,13 @@ func (fp *flowProvider) subtasksToMarkdown(subtasks []tools.SubtaskInfo) string 
 }
 
 func (fp *flowProvider) getContainerPortsDescription() string {
-	ports := docker.GetPrimaryContainerPorts(fp.flowID)
+	ports := docker.GetPrimaryContainerPorts(fp.cfg.WorkerPortsBase(), fp.flowID)
 	var buffer strings.Builder
 
 	buffer.WriteString("**OOB Attack Infrastructure:**\n\n")
 
 	// Host network mode: container has direct access to host network interfaces
-	if fp.dockerNetwork == "host" {
+	if fp.cfg.WorkerNetwork() == "host" {
 		buffer.WriteString("This container uses **host network mode** with direct access to host network interfaces.\n\n")
 		buffer.WriteString("**MANDATORY PORTS - YOU MUST USE ONLY THESE:**\n\n")
 
@@ -852,14 +883,14 @@ func (fp *flowProvider) getContainerPortsDescription() string {
 		buffer.WriteString("- All host network interfaces are accessible for binding\n\n")
 
 		buffer.WriteString("**Usage for OOB Attacks:**\n")
-		if fp.publicIP == "0.0.0.0" {
+		if fp.cfg.WorkerPublicIP() == "0.0.0.0" {
 			buffer.WriteString("To determine the public IP for callbacks:\n")
 			buffer.WriteString("1. Discover your public IP: `curl -s https://api.ipify.org` or `curl -s ipinfo.io/ip`\n")
 			buffer.WriteString("2. Use discovered IP in exploit payloads for callbacks\n")
 			buffer.WriteString("3. Listen on allocated ports (shown above) to receive connections\n\n")
 			buffer.WriteString("**Important:** Check Task.Input - user may have specified the public IP to use.\n")
 		} else {
-			buffer.WriteString(fmt.Sprintf("Your external IP is: **%s**\n\n", fp.publicIP))
+			buffer.WriteString(fmt.Sprintf("Your external IP is: **%s**\n\n", fp.cfg.WorkerPublicIP()))
 			buffer.WriteString("Use this IP in exploit payloads requiring callbacks (DNS exfiltration, reverse shells, XXE OOB, SSRF verification, etc.)\n")
 			buffer.WriteString("Listen on the allocated ports above to receive incoming connections.\n")
 		}
@@ -868,7 +899,7 @@ func (fp *flowProvider) getContainerPortsDescription() string {
 		buffer.WriteString("**MANDATORY FORWARDED PORTS - YOU MUST USE ONLY THESE:**\n\n")
 
 		for _, port := range ports {
-			buffer.WriteString(fmt.Sprintf("- Port %d/tcp (container) → %s:%d (external)\n", port, fp.publicIP, port))
+			buffer.WriteString(fmt.Sprintf("- Port %d/tcp (container) → %s:%d (external)\n", port, fp.cfg.WorkerPublicIP(), port))
 		}
 
 		buffer.WriteString("\n**Port Usage Rules:**\n")
@@ -879,14 +910,14 @@ func (fp *flowProvider) getContainerPortsDescription() string {
 
 		buffer.WriteString("**Usage for OOB Attacks:**\n")
 
-		if fp.publicIP == "0.0.0.0" {
+		if fp.cfg.WorkerPublicIP() == "0.0.0.0" {
 			buffer.WriteString("The bind IP is 0.0.0.0 (all interfaces). To receive external callbacks:\n")
 			buffer.WriteString("1. Discover your public IP: `curl -s https://api.ipify.org` or `curl -s ipinfo.io/ip`\n")
 			buffer.WriteString("2. Use discovered IP in exploit payloads for callbacks\n")
 			buffer.WriteString("3. Listen on container ports (shown above) to receive connections\n\n")
 			buffer.WriteString("**Important:** Check Task.Input - user may have specified the public IP to use.\n")
 		} else {
-			buffer.WriteString(fmt.Sprintf("Your external IP is: %s\n", fp.publicIP))
+			buffer.WriteString(fmt.Sprintf("Your external IP is: %s\n", fp.cfg.WorkerPublicIP()))
 			buffer.WriteString("Use this IP in exploit payloads requiring callbacks (DNS exfiltration, reverse shells, XXE OOB, SSRF verification, etc.)\n")
 			buffer.WriteString("Listen on the container ports above to receive incoming connections.\n")
 		}

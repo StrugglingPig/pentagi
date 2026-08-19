@@ -61,35 +61,44 @@ export default defineConfig(({ mode }) => {
             minify: 'terser',
             rollupOptions: {
                 output: {
-                    manualChunks: {
-                        'apollo-client': ['@apollo/client', 'graphql', 'graphql-ws'],
-                        markdown: ['react-markdown', 'rehype-highlight', 'rehype-raw', 'rehype-slug', 'remark-gfm'],
-                        pdf: ['html2pdf.js'],
-                        'radix-ui': [
-                            '@radix-ui/react-accordion',
-                            '@radix-ui/react-avatar',
-                            '@radix-ui/react-collapsible',
-                            '@radix-ui/react-dialog',
-                            '@radix-ui/react-dropdown-menu',
-                            '@radix-ui/react-label',
-                            '@radix-ui/react-popover',
-                            '@radix-ui/react-scroll-area',
-                            '@radix-ui/react-select',
-                            '@radix-ui/react-separator',
-                            '@radix-ui/react-slot',
-                            '@radix-ui/react-switch',
-                            '@radix-ui/react-tabs',
-                            '@radix-ui/react-tooltip',
-                            '@radix-ui/react-progress',
-                        ],
-                        'react-vendor': ['react', 'react-dom', 'react-router-dom'],
-                        terminal: [
-                            '@xterm/addon-fit',
-                            '@xterm/addon-search',
-                            '@xterm/addon-unicode11',
-                            '@xterm/addon-web-links',
-                            '@xterm/addon-webgl',
-                            '@xterm/xterm',
+                    // A group captures its modules' dependencies too (`includeDependenciesRecursively`
+                    // defaults to true), so a shared module must outrank the heavy libraries depending
+                    // on it. At equal priority react/jsx-runtime lands inside `markdown` and clsx inside
+                    // `charts`, and index.html then preloads both on every route.
+                    codeSplitting: {
+                        groups: [
+                            {
+                                name: 'react-vendor',
+                                priority: 100,
+                                test: /node_modules[\\/](react|react-dom|react-router-dom)[\\/]/,
+                            },
+                            {
+                                name: 'utils',
+                                priority: 90,
+                                test: /node_modules[\\/](clsx|tailwind-merge)[\\/]/,
+                            },
+                            {
+                                name: 'apollo-client',
+                                priority: 50,
+                                test: /node_modules[\\/](@apollo[\\/]client|graphql|graphql-ws)[\\/]/,
+                            },
+                            {
+                                name: 'markdown',
+                                priority: 50,
+                                test: /node_modules[\\/](react-markdown|rehype-highlight|rehype-slug|remark-gfm)[\\/]/,
+                            },
+                            { name: 'radix-ui', priority: 50, test: /node_modules[\\/]@radix-ui[\\/]/ },
+                            { name: 'terminal', priority: 50, test: /node_modules[\\/]@xterm[\\/]/ },
+                            { name: 'charts', priority: 50, test: /node_modules[\\/]recharts[\\/]/ },
+                            { name: 'pdf', priority: 50, test: /node_modules[\\/]@react-pdf[\\/]/ },
+                            {
+                                name: 'tiptap',
+                                priority: 50,
+                                test: /node_modules[\\/](@tiptap|prosemirror-[a-z-]+)[\\/]/,
+                            },
+                            // Without an own chunk, marked gets folded into the tiptap chunk, and report-pdf's
+                            // static `import { marked }` would download all of it for a ~40KB library.
+                            { name: 'marked', priority: 60, test: /node_modules[\\/]marked[\\/]/ },
                         ],
                     },
                 },
@@ -129,6 +138,9 @@ export default defineConfig(({ mode }) => {
                 '@': path.resolve(__dirname, './src'),
             },
         },
+        // `vite preview` serves the production build, which is the only place chunking exists —
+        // but it has no proxy of its own, so without this the built app cannot reach the API.
+        preview: { ...serverConfig, port: vitePort + 100 },
         server: serverConfig,
     };
 });

@@ -10,14 +10,13 @@ import (
 	"pentagi/pkg/graph/subscriptions"
 	"pentagi/pkg/providers"
 
-	lru "github.com/hashicorp/golang-lru/v2/expirable"
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/vxcontrol/langchaingo/llms/reasoning"
 )
 
 const (
 	updateMsgTimeout = 30 * time.Second
 	streamCacheSize  = 1000
-	streamCacheTTL   = 2 * time.Hour
 )
 
 type FlowAssistantLogWorker interface {
@@ -57,7 +56,7 @@ type flowAssistantLogWorker struct {
 	flowID      int64
 	assistantID int64
 	results     map[int64]chan *providers.StreamMessageChunk
-	streamCache *lru.LRU[int64, int64] // streamID -> msgID
+	streamCache *lru.Cache[int64, int64] // streamID -> msgID
 	pub         subscriptions.FlowPublisher
 }
 
@@ -70,7 +69,7 @@ func NewFlowAssistantLogWorker(
 		flowID:      flowID,
 		assistantID: assistantID,
 		results:     make(map[int64]chan *providers.StreamMessageChunk),
-		streamCache: lru.NewLRU[int64, int64](streamCacheSize, nil, streamCacheTTL),
+		streamCache: func() *lru.Cache[int64, int64] { c, _ := lru.New[int64, int64](streamCacheSize); return c }(),
 		pub:         pub,
 	}
 }
@@ -165,10 +164,6 @@ func (aslw *flowAssistantLogWorker) putMsg(
 	streamID int64,
 	thinking, msg string,
 ) (int64, error) {
-	if len(msg) > defaultMaxMessageLength {
-		msg = msg[:defaultMaxMessageLength] + "..."
-	}
-
 	msgID, msgFound := aslw.streamCache.Get(streamID)
 	ch, workerFound := aslw.results[streamID]
 
@@ -292,7 +287,7 @@ func (aslw *flowAssistantLogWorker) workerMsgUpdater(
 	contentBuf := bytes.NewBuffer(contentData)
 	thinkingData := make([]byte, 0, defaultMaxMessageLength)
 	thinkingBuf := bytes.NewBuffer(thinkingData)
-	wasUpdated := false // track if we actually updated the record
+	wasUpdated := false
 
 	msgLog, err := aslw.db.GetFlowAssistantLog(ctx, msgID)
 	if err != nil {
@@ -373,7 +368,14 @@ func (aslw *flowAssistantLogWorker) workerMsgUpdater(
 	for {
 		select {
 		case <-timer.C:
-			aslw.mx.Lock()
+			// TryLock avoids a deadlock: while this branch holds up reading from ch,
+			// StreamFlowAssistantMsg may be blocked on a full ch <- chunk while
+			// holding aslw.mx. If the mutex is taken, the stream is still active —
+			// reset the timer and keep draining instead of blocking.
+			if !aslw.mx.TryLock() {
+				timer.Reset(updateMsgTimeout)
+				continue
+			}
 			defer aslw.mx.Unlock()
 
 			for i := 0; i < len(ch); i++ {

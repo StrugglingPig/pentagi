@@ -70,15 +70,13 @@ func SanitizeUTF8(msg string) string {
 	}
 
 	var builder strings.Builder
-	builder.Grow(len(msg)) // Pre-allocate for efficiency
+	builder.Grow(len(msg))
 
 	for i := 0; i < len(msg); {
-		// Explicitly skip null bytes
 		if msg[i] == '\x00' {
 			i++
 			continue
 		}
-		// Decode rune and check for errors
 		r, size := utf8.DecodeRuneInString(msg[i:])
 		if r == utf8.RuneError && size == 1 {
 			// Invalid UTF-8 byte, replace with Unicode replacement character
@@ -123,15 +121,16 @@ func (*GormLogger) Print(v ...interface{}) {
 	}
 }
 
-func NewGorm(dsn, dbType string) (*gorm.DB, error) {
-	db, err := gorm.Open(dbType, dsn)
+// NewGorm creates a GORM instance backed by the provided *sql.DB.
+// Passing an existing db ensures GORM shares the same connection pool as
+// the sqlc Queries client, so the two clients together consume at most
+// DBMaxOpenConns connections instead of doubling the Postgres load.
+func NewGorm(db *sql.DB, debug bool) (*gorm.DB, error) {
+	orm, err := gorm.Open("postgres", db)
 	if err != nil {
 		return nil, err
 	}
-	db.DB().SetMaxIdleConns(5)
-	db.DB().SetMaxOpenConns(20)
-	db.DB().SetConnMaxLifetime(time.Hour)
-	db.SetLogger(&GormLogger{})
-	db.LogMode(true)
-	return db, nil
+	orm.SetLogger(&GormLogger{})
+	orm.LogMode(debug)
+	return orm, nil
 }

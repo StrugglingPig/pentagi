@@ -1,14 +1,15 @@
+import { skipToken, useMutation, useQuery, useSubscription } from '@apollo/client/react';
 import { createContext, type ReactNode, useCallback, useContext, useMemo } from 'react';
 import { toast } from 'sonner';
 
 import {
-    useCreateFlowTemplateMutation,
-    useDeleteFlowTemplateMutation,
-    useFlowTemplateCreatedSubscription,
-    useFlowTemplateDeletedSubscription,
-    useFlowTemplatesQuery,
-    useFlowTemplateUpdatedSubscription,
-    useUpdateFlowTemplateMutation,
+    CreateFlowTemplateDocument,
+    DeleteFlowTemplateDocument,
+    FlowTemplateCreatedDocument,
+    FlowTemplateDeletedDocument,
+    FlowTemplatesDocument,
+    FlowTemplateUpdatedDocument,
+    UpdateFlowTemplateDocument,
 } from '@/graphql/types';
 import { Log } from '@/lib/log';
 import { useUser } from '@/providers/user-provider';
@@ -25,8 +26,10 @@ export interface Template {
 interface TemplatesContextValue {
     createTemplate: (title: string, text: string) => Promise<void>;
     deleteTemplate: (id: string) => Promise<void>;
+    error?: Error;
     getTemplate: (id: string) => Template | undefined;
     isLoading: boolean;
+    refetch: () => unknown;
     templates: Template[];
     updateTemplate: (id: string, payload: { text: string; title: string }) => Promise<void>;
 }
@@ -37,36 +40,34 @@ interface TemplatesProviderProps {
 
 const TemplatesContext = createContext<TemplatesContextValue | undefined>(undefined);
 
-export const TemplatesProvider = ({ children }: TemplatesProviderProps) => {
+export function TemplatesProvider({ children }: TemplatesProviderProps) {
     const { authInfo, isAuthenticated } = useUser();
 
     const shouldFetchTemplates = Boolean(authInfo && authInfo.type !== 'guest' && isAuthenticated());
 
-    // GraphQL query for templates
-    const { data: templatesData, loading: isLoadingTemplates } = useFlowTemplatesQuery({
-        fetchPolicy: 'cache-and-network',
+    const {
+        data: templatesData,
+        error: templatesError,
+        loading: isLoadingTemplates,
+        refetch,
+    } = useQuery(FlowTemplatesDocument, shouldFetchTemplates ? { fetchPolicy: 'cache-and-network' } : skipToken);
+
+    const [createTemplateMutation] = useMutation(CreateFlowTemplateDocument);
+    const [updateTemplateMutation] = useMutation(UpdateFlowTemplateDocument);
+    const [deleteTemplateMutation] = useMutation(DeleteFlowTemplateDocument);
+
+    useSubscription(FlowTemplateCreatedDocument, {
         skip: !shouldFetchTemplates,
     });
 
-    // GraphQL mutations
-    const [createTemplateMutation] = useCreateFlowTemplateMutation();
-    const [updateTemplateMutation] = useUpdateFlowTemplateMutation();
-    const [deleteTemplateMutation] = useDeleteFlowTemplateMutation();
-
-    // GraphQL subscriptions (only for authenticated users)
-    useFlowTemplateCreatedSubscription({
+    useSubscription(FlowTemplateUpdatedDocument, {
         skip: !shouldFetchTemplates,
     });
 
-    useFlowTemplateUpdatedSubscription({
+    useSubscription(FlowTemplateDeletedDocument, {
         skip: !shouldFetchTemplates,
     });
 
-    useFlowTemplateDeletedSubscription({
-        skip: !shouldFetchTemplates,
-    });
-
-    // Convert GraphQL templates to Template interface
     const templates = useMemo(() => {
         const rawTemplates = templatesData?.flowTemplates ?? [];
 
@@ -158,18 +159,29 @@ export const TemplatesProvider = ({ children }: TemplatesProviderProps) => {
         () => ({
             createTemplate,
             deleteTemplate,
+            error: templatesError,
             getTemplate,
             isLoading: isLoadingTemplates,
+            refetch,
             templates,
             updateTemplate,
         }),
-        [createTemplate, deleteTemplate, getTemplate, isLoadingTemplates, templates, updateTemplate],
+        [
+            createTemplate,
+            deleteTemplate,
+            templatesError,
+            getTemplate,
+            isLoadingTemplates,
+            refetch,
+            templates,
+            updateTemplate,
+        ],
     );
 
     return <TemplatesContext.Provider value={value}>{children}</TemplatesContext.Provider>;
-};
+}
 
-export const useTemplates = () => {
+export function useTemplates() {
     const context = useContext(TemplatesContext);
 
     if (context === undefined) {
@@ -177,4 +189,4 @@ export const useTemplates = () => {
     }
 
     return context;
-};
+}

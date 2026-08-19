@@ -20,17 +20,13 @@
         "noEmit": true,
 
         /* If your code runs in the DOM: */
-        "lib": ["es2022", "dom", "dom.iterable"],
+        "lib": ["es2023", "dom", "dom.iterable"],
         "jsx": "react-jsx",
 
-        "baseUrl": ".",
         "paths": {
-            "@/*": ["./src/*"],
-            "@env": ["./env.ts"],
-            "@pkg": ["./package.json"],
-
-            "@/ui/*": ["./src/components/ui/*"]
+            "@/*": ["./src/*"]
         }
     },
-    "include": ["src", "./env.ts", "types/**/*.d.ts"]
+    "include": ["src", "types/**/*.d.ts"],
+    "exclude": ["src/**/*-corpus.test.ts"]
 }

@@ -1,40 +1,102 @@
 import type { ColumnDef } from '@tanstack/react-table';
 
-import { ArrowDown, ArrowUp, FileText, Loader2, MoreHorizontal, Pencil, Plus, Trash } from 'lucide-react';
-import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Ellipsis, FileText, Pencil, PencilLine, Plus, Trash } from 'lucide-react';
+import { useCallback, useRef, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { toast } from 'sonner';
 
+import {
+    AppHeader,
+    AppHeaderAction,
+    AppHeaderActions,
+    AppHeaderContent,
+    AppHeaderTitle,
+} from '@/components/layouts/app/app-header';
 import ConfirmationDialog from '@/components/shared/confirmation-dialog';
-import { Breadcrumb, BreadcrumbItem, BreadcrumbList, BreadcrumbPage } from '@/components/ui/breadcrumb';
+import { ErrorState } from '@/components/shared/error-state';
+import { InlineEditInput } from '@/components/shared/inline-edit';
+import { LoadingState } from '@/components/shared/loading-state';
 import { Button } from '@/components/ui/button';
 import { ContextMenuItem, ContextMenuSeparator } from '@/components/ui/context-menu';
-import { DataTable } from '@/components/ui/data-table';
+import { DataTable, DataTableColumnHeader } from '@/components/ui/data-table';
 import {
     DropdownMenu,
     DropdownMenuContent,
     DropdownMenuItem,
+    DropdownMenuSeparator,
     DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Separator } from '@/components/ui/separator';
-import { SidebarTrigger } from '@/components/ui/sidebar';
-import { StatusCard } from '@/components/ui/status-card';
+import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty';
+import { Spinner } from '@/components/ui/spinner';
+import { useTableState } from '@/hooks/use-table-state';
+import { routes } from '@/lib/routes';
+import { mergeHrefWithSearchParams } from '@/lib/url-params';
 import { type Template, useTemplates } from '@/providers/templates-provider';
 
-const Templates = () => {
+function Templates() {
     const navigate = useNavigate();
-    const { deleteTemplate, templates } = useTemplates();
+    const location = useLocation();
+    const { deleteTemplate, error, isLoading, refetch, templates, updateTemplate } = useTemplates();
     const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
     const [deletingTemplate, setDeletingTemplate] = useState<null | Template>(null);
     const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
+    const [editingTemplateId, setEditingTemplateId] = useState<null | string>(null);
+    const [isRenameLoading, setIsRenameLoading] = useState(false);
+    const editingInputRef = useRef<HTMLInputElement>(null);
 
-    const handleTemplateOpen = (templateId: string) => {
-        navigate(`/templates/${templateId}`);
-    };
+    const { filter, setFilter } = useTableState();
 
-    const handleDeleteDialogOpen = (template: Template) => {
+    const handleTemplateOpen = useCallback(
+        (templateId: string) => {
+            navigate(mergeHrefWithSearchParams(routes.template(templateId), new URLSearchParams(location.search)));
+        },
+        [navigate, location.search],
+    );
+
+    const handleDeleteDialogOpen = useCallback((template: Template) => {
         setDeletingTemplate(template);
         setIsDeleteDialogOpen(true);
-    };
+    }, []);
+
+    const handleTemplateRenameStart = useCallback((template: Template) => {
+        setEditingTemplateId(template.id);
+    }, []);
+
+    const handleTemplateRenameCancel = useCallback(() => {
+        setEditingTemplateId(null);
+    }, []);
+
+    const handleTemplateRenameSave = useCallback(async () => {
+        const newTitle = editingInputRef.current?.value.trim();
+
+        if (!editingTemplateId || !newTitle) {
+            return;
+        }
+
+        const template = templates.find((t) => t.id === editingTemplateId);
+
+        if (!template) {
+            return;
+        }
+
+        if (newTitle === template.title) {
+            setEditingTemplateId(null);
+
+            return;
+        }
+
+        setIsRenameLoading(true);
+
+        try {
+            await updateTemplate(editingTemplateId, { text: template.text, title: newTitle });
+            toast.success('Template renamed successfully');
+            setEditingTemplateId(null);
+        } catch {
+            // Error already handled in provider with toast
+        } finally {
+            setIsRenameLoading(false);
+        }
+    }, [editingTemplateId, templates, updateTemplate]);
 
     const handleDelete = async () => {
         if (!deletingTemplate) {
@@ -61,25 +123,36 @@ const Templates = () => {
     const columns: ColumnDef<Template>[] = [
         {
             accessorKey: 'title',
-            cell: ({ row }) => <div className="font-medium">{row.getValue('title')}</div>,
-            header: ({ column }) => {
-                const sorted = column.getIsSorted();
+            cell: ({ row }) => {
+                const template = row.original;
+                const isEditing = editingTemplateId === template.id;
+                const title = row.getValue('title') as string;
 
-                return (
-                    <Button
-                        className="text-muted-foreground hover:text-primary flex items-center gap-2 p-0 no-underline hover:no-underline"
-                        onClick={() => column.toggleSorting(column.getIsSorted() === 'asc')}
-                        variant="link"
-                    >
-                        Title
-                        {sorted === 'asc' ? (
-                            <ArrowDown className="size-4" />
-                        ) : sorted === 'desc' ? (
-                            <ArrowUp className="size-4" />
-                        ) : null}
-                    </Button>
-                );
+                if (isEditing) {
+                    return (
+                        <div onClick={(e) => e.stopPropagation()}>
+                            <InlineEditInput
+                                autoFocus
+                                busy={isRenameLoading}
+                                defaultValue={title}
+                                inputRef={editingInputRef}
+                                onCancel={handleTemplateRenameCancel}
+                                onSave={handleTemplateRenameSave}
+                                placeholder="Template title"
+                            />
+                        </div>
+                    );
+                }
+
+                return <div className="max-w-[380px] truncate font-medium">{title}</div>;
             },
+            header: ({ column }) => (
+                <DataTableColumnHeader
+                    column={column}
+                    title="Title"
+                />
+            ),
+            meta: { searchable: true },
         },
         {
             accessorKey: 'text',
@@ -88,24 +161,13 @@ const Templates = () => {
 
                 return <div className="text-muted-foreground max-w-[380px] truncate text-sm">{text}</div>;
             },
-            header: ({ column }) => {
-                const sorted = column.getIsSorted();
-
-                return (
-                    <Button
-                        className="text-muted-foreground hover:text-primary flex items-center gap-2 p-0 no-underline hover:no-underline"
-                        onClick={() => column.toggleSorting(column.getIsSorted() === 'asc')}
-                        variant="link"
-                    >
-                        Text
-                        {sorted === 'asc' ? (
-                            <ArrowDown className="size-4" />
-                        ) : sorted === 'desc' ? (
-                            <ArrowUp className="size-4" />
-                        ) : null}
-                    </Button>
-                );
-            },
+            header: ({ column }) => (
+                <DataTableColumnHeader
+                    column={column}
+                    title="Text"
+                />
+            ),
+            meta: { searchable: true },
         },
         {
             cell: ({ row }) => {
@@ -116,32 +178,40 @@ const Templates = () => {
                         <DropdownMenu>
                             <DropdownMenuTrigger asChild>
                                 <Button
+                                    aria-label="Open menu"
                                     className="size-8 p-0"
+                                    onClick={(e) => e.stopPropagation()}
                                     variant="ghost"
                                 >
-                                    <MoreHorizontal />
+                                    <Ellipsis />
                                 </Button>
                             </DropdownMenuTrigger>
                             <DropdownMenuContent
                                 align="end"
                                 className="min-w-24"
+                                onClick={(e) => e.stopPropagation()}
                             >
                                 <DropdownMenuItem onClick={() => handleTemplateOpen(template.id)}>
                                     <Pencil />
                                     Edit
                                 </DropdownMenuItem>
+                                <DropdownMenuItem onClick={() => handleTemplateRenameStart(template)}>
+                                    <Pencil className="size-3" />
+                                    Rename
+                                </DropdownMenuItem>
+                                <DropdownMenuSeparator />
                                 <DropdownMenuItem
                                     disabled={deletingIds.has(template.id)}
                                     onClick={() => handleDeleteDialogOpen(template)}
                                 >
                                     {deletingIds.has(template.id) ? (
                                         <>
-                                            <Loader2 className="size-4 animate-spin" />
+                                            <Spinner variant="circle" />
                                             Deleting...
                                         </>
                                     ) : (
                                         <>
-                                            <Trash className="size-4" />
+                                            <Trash />
                                             Delete
                                         </>
                                     )}
@@ -165,6 +235,10 @@ const Templates = () => {
                 <Pencil />
                 Edit
             </ContextMenuItem>
+            <ContextMenuItem onClick={() => handleTemplateRenameStart(template)}>
+                <PencilLine />
+                Rename
+            </ContextMenuItem>
             <ContextMenuSeparator />
             <ContextMenuItem
                 disabled={deletingIds.has(template.id)}
@@ -177,54 +251,74 @@ const Templates = () => {
     );
 
     const pageHeader = (
-        <header className="bg-background sticky top-0 z-10 flex h-12 w-full shrink-0 items-center gap-2 border-b transition-[width,height] ease-linear group-has-data-[collapsible=icon]/sidebar-wrapper:h-12">
-            <div className="flex items-center gap-2 px-4">
-                <SidebarTrigger className="-ml-1" />
-                <Separator
-                    className="h-4"
-                    orientation="vertical"
-                />
-                <Breadcrumb>
-                    <BreadcrumbList>
-                        <BreadcrumbItem>
-                            <FileText className="size-4" />
-                            <BreadcrumbPage>Templates</BreadcrumbPage>
-                        </BreadcrumbItem>
-                    </BreadcrumbList>
-                </Breadcrumb>
-            </div>
-            <div className="ml-auto flex items-center gap-2 px-4">
-                <Button
-                    onClick={() => navigate('/templates/new')}
-                    size="sm"
+        <AppHeader>
+            <AppHeaderContent>
+                <AppHeaderTitle icon={<FileText className="size-4 shrink-0" />}>Templates</AppHeaderTitle>
+            </AppHeaderContent>
+            <AppHeaderActions>
+                <AppHeaderAction
+                    icon={<Plus />}
+                    label="New Template"
+                    onClick={() => navigate(routes.newTemplate)}
                     variant="secondary"
-                >
-                    <Plus />
-                    New Template
-                </Button>
-            </div>
-        </header>
+                />
+            </AppHeaderActions>
+        </AppHeader>
     );
+
+    if (isLoading && !templates.length) {
+        return (
+            <>
+                {pageHeader}
+                <div className="flex flex-1 flex-col gap-4 p-4">
+                    <LoadingState
+                        description="Please wait while we fetch your flow templates"
+                        title="Loading templates..."
+                    />
+                </div>
+            </>
+        );
+    }
+
+    // Error surface only when there's no data — a failed background refetch must not blank a working list.
+    if (error && !templates.length) {
+        return (
+            <>
+                {pageHeader}
+                <div className="flex flex-1 flex-col gap-4 p-4">
+                    <ErrorState
+                        message={error.message}
+                        onRetry={refetch}
+                        title="Error loading templates"
+                    />
+                </div>
+            </>
+        );
+    }
 
     if (!templates.length) {
         return (
             <>
                 {pageHeader}
-                <div className="flex flex-col gap-4 p-4">
-                    <StatusCard
-                        action={
+                <div className="flex flex-1 flex-col gap-4 p-4">
+                    <Empty>
+                        <EmptyHeader>
+                            <EmptyMedia variant="icon">
+                                <FileText />
+                            </EmptyMedia>
+                            <EmptyTitle>No templates yet</EmptyTitle>
+                            <EmptyDescription>Create your first template to get started</EmptyDescription>
+                        </EmptyHeader>
+                        <EmptyContent>
                             <Button
-                                onClick={() => navigate('/templates/new')}
+                                onClick={() => navigate(routes.newTemplate)}
                                 variant="secondary"
                             >
-                                <Plus className="size-4" />
+                                <Plus />
                                 New Template
                             </Button>
-                        }
-                        description="Create your first template to get started"
-                        icon={<FileText className="text-muted-foreground size-8" />}
-                        title="No templates yet"
-                    />
+                        </EmptyContent>
+                    </Empty>
                 </div>
             </>
         );
@@ -237,9 +331,15 @@ const Templates = () => {
                 <DataTable
                     columns={columns}
                     data={templates}
-                    filterColumn="title"
+                    empty={{ entityName: 'templates' }}
                     filterPlaceholder="Filter templates..."
-                    onRowClick={(template) => handleTemplateOpen(template.id)}
+                    filterValue={filter}
+                    onFilterChange={setFilter}
+                    onRowClick={(template) => {
+                        if (editingTemplateId !== template.id) {
+                            handleTemplateOpen(template.id);
+                        }
+                    }}
                     renderRowContextMenu={renderRowContextMenu}
                 />
 
@@ -255,6 +355,6 @@ const Templates = () => {
             </div>
         </>
     );
-};
+}
 
 export default Templates;

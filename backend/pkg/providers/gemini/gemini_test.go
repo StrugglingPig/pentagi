@@ -121,7 +121,7 @@ func TestGeminiSpecificFeatures(t *testing.T) {
 	}
 
 	// Test that we have current Gemini models
-	expectedModels := []string{"gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"}
+	expectedModels := []string{"gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.5-flash", "gemini-3.1-pro-preview"}
 	for _, expectedModel := range expectedModels {
 		found := false
 		for _, model := range models {
@@ -250,7 +250,6 @@ func TestAPIKeyTransportRoundTrip(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// create mock round tripper that captures the request
 			var capturedReq *http.Request
 			mockRT := &mockRoundTripper{
 				roundTripFunc: func(req *http.Request) (*http.Response, error) {
@@ -270,7 +269,6 @@ func TestAPIKeyTransportRoundTrip(t *testing.T) {
 				ProxyURL:  "",
 			}
 
-			// create test request
 			reqURL := tt.requestURL
 			if tt.requestQuery != "" {
 				reqURL += "?" + tt.requestQuery
@@ -280,13 +278,11 @@ func TestAPIKeyTransportRoundTrip(t *testing.T) {
 				t.Fatalf("Failed to create request: %v", err)
 			}
 
-			// execute RoundTrip
 			_, err = transport.RoundTrip(req)
 			if err != nil {
 				t.Fatalf("RoundTrip failed: %v", err)
 			}
 
-			// verify captured request
 			if capturedReq == nil {
 				t.Fatal("Request was not captured")
 			}

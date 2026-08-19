@@ -35,18 +35,23 @@ type APITokenWithSecret struct {
 }
 
 type AgentConfig struct {
-	Model             string           `json:"model"`
-	MaxTokens         *int             `json:"maxTokens,omitempty"`
-	Temperature       *float64         `json:"temperature,omitempty"`
-	TopK              *int             `json:"topK,omitempty"`
-	TopP              *float64         `json:"topP,omitempty"`
-	MinLength         *int             `json:"minLength,omitempty"`
-	MaxLength         *int             `json:"maxLength,omitempty"`
-	RepetitionPenalty *float64         `json:"repetitionPenalty,omitempty"`
-	FrequencyPenalty  *float64         `json:"frequencyPenalty,omitempty"`
-	PresencePenalty   *float64         `json:"presencePenalty,omitempty"`
-	Reasoning         *ReasoningConfig `json:"reasoning,omitempty"`
-	Price             *ModelPrice      `json:"price,omitempty"`
+	Model             string                 `json:"model"`
+	MaxTokens         *int                   `json:"maxTokens,omitempty"`
+	Temperature       *float64               `json:"temperature,omitempty"`
+	TopK              *int                   `json:"topK,omitempty"`
+	TopP              *float64               `json:"topP,omitempty"`
+	MinLength         *int                   `json:"minLength,omitempty"`
+	MaxLength         *int                   `json:"maxLength,omitempty"`
+	RepetitionPenalty *float64               `json:"repetitionPenalty,omitempty"`
+	FrequencyPenalty  *float64               `json:"frequencyPenalty,omitempty"`
+	PresencePenalty   *float64               `json:"presencePenalty,omitempty"`
+	MinP              *float64               `json:"minP,omitempty"`
+	N                 *int                   `json:"n,omitempty"`
+	JSON              *bool                  `json:"json,omitempty"`
+	ResponseMimeType  *string                `json:"responseMimeType,omitempty"`
+	Reasoning         *ReasoningConfig       `json:"reasoning,omitempty"`
+	Price             *ModelPrice            `json:"price,omitempty"`
+	ExtraBody         map[string]interface{} `json:"extraBody,omitempty"`
 }
 
 type AgentLog struct {
@@ -147,6 +152,16 @@ type CreateFlowTemplateInput struct {
 	Text  string `json:"text"`
 }
 
+type CreateKnowledgeDocumentInput struct {
+	DocType     KnowledgeDocType     `json:"docType"`
+	Content     string               `json:"content"`
+	Question    string               `json:"question"`
+	Description *string              `json:"description,omitempty"`
+	GuideType   *KnowledgeGuideType  `json:"guideType,omitempty"`
+	AnswerType  *KnowledgeAnswerType `json:"answerType,omitempty"`
+	CodeLang    *string              `json:"codeLang,omitempty"`
+}
+
 type DailyFlowsStats struct {
 	Date  time.Time   `json:"date"`
 	Stats *FlowsStats `json:"stats"`
@@ -184,6 +199,7 @@ type DefaultProvidersConfig struct {
 	Glm       *ProviderConfig `json:"glm,omitempty"`
 	Kimi      *ProviderConfig `json:"kimi,omitempty"`
 	Qwen      *ProviderConfig `json:"qwen,omitempty"`
+	Minimax   *ProviderConfig `json:"minimax,omitempty"`
 }
 
 type Flow struct {
@@ -208,6 +224,15 @@ type FlowExecutionStats struct {
 	TotalToolcallsCount  int                   `json:"totalToolcallsCount"`
 	TotalAssistantsCount int                   `json:"totalAssistantsCount"`
 	Tasks                []*TaskExecutionStats `json:"tasks"`
+}
+
+type FlowFile struct {
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	Path       string    `json:"path"`
+	Size       int       `json:"size"`
+	IsDir      bool      `json:"isDir"`
+	ModifiedAt time.Time `json:"modifiedAt"`
 }
 
 type FlowStats struct {
@@ -240,6 +265,38 @@ type FunctionToolcallsStats struct {
 	AvgDurationSeconds   float64 `json:"avgDurationSeconds"`
 }
 
+type KnowledgeDocument struct {
+	ID          string               `json:"id"`
+	DocType     KnowledgeDocType     `json:"docType"`
+	Content     string               `json:"content"`
+	Question    string               `json:"question"`
+	Description *string              `json:"description,omitempty"`
+	UserID      int64                `json:"userId"`
+	FlowID      *int64               `json:"flowId,omitempty"`
+	TaskID      *int64               `json:"taskId,omitempty"`
+	SubtaskID   *int64               `json:"subtaskId,omitempty"`
+	GuideType   *KnowledgeGuideType  `json:"guideType,omitempty"`
+	AnswerType  *KnowledgeAnswerType `json:"answerType,omitempty"`
+	CodeLang    *string              `json:"codeLang,omitempty"`
+	PartSize    int                  `json:"partSize"`
+	TotalSize   int                  `json:"totalSize"`
+	Manual      bool                 `json:"manual"`
+}
+
+type KnowledgeDocumentWithScore struct {
+	Score    float64            `json:"score"`
+	Document *KnowledgeDocument `json:"document"`
+}
+
+type KnowledgeFilter struct {
+	DocTypes    []KnowledgeDocType    `json:"docTypes,omitempty"`
+	GuideTypes  []KnowledgeGuideType  `json:"guideTypes,omitempty"`
+	AnswerTypes []KnowledgeAnswerType `json:"answerTypes,omitempty"`
+	CodeLangs   []string              `json:"codeLangs,omitempty"`
+	FlowID      *int64                `json:"flowId,omitempty"`
+	Manual      *bool                 `json:"manual,omitempty"`
+}
+
 type MessageLog struct {
 	ID           int64          `json:"id"`
 	Type         MessageLogType `json:"type"`
@@ -253,12 +310,20 @@ type MessageLog struct {
 	CreatedAt    time.Time      `json:"createdAt"`
 }
 
+type ModelAgentsUsageStats struct {
+	Model      string      `json:"model"`
+	Provider   string      `json:"provider"`
+	AgentTypes []AgentType `json:"agentTypes"`
+	Stats      *UsageStats `json:"stats"`
+}
+
 type ModelConfig struct {
-	Name        string      `json:"name"`
-	Description *string     `json:"description,omitempty"`
-	ReleaseDate *time.Time  `json:"releaseDate,omitempty"`
-	Thinking    *bool       `json:"thinking,omitempty"`
-	Price       *ModelPrice `json:"price,omitempty"`
+	Name        string              `json:"name"`
+	Description *string             `json:"description,omitempty"`
+	ReleaseDate *time.Time          `json:"releaseDate,omitempty"`
+	Thinking    *bool               `json:"thinking,omitempty"`
+	Reasoning   *ModelReasoningInfo `json:"reasoning,omitempty"`
+	Price       *ModelPrice         `json:"price,omitempty"`
 }
 
 type ModelPrice struct {
@@ -266,6 +331,14 @@ type ModelPrice struct {
 	Output     float64 `json:"output"`
 	CacheRead  float64 `json:"cacheRead"`
 	CacheWrite float64 `json:"cacheWrite"`
+}
+
+type ModelReasoningInfo struct {
+	Mode          *ModelReasoningMode `json:"mode,omitempty"`
+	Efforts       []ReasoningEffort   `json:"efforts,omitempty"`
+	Supported     *bool               `json:"supported,omitempty"`
+	CannotDisable *bool               `json:"cannotDisable,omitempty"`
+	DefaultOn     *bool               `json:"defaultOn,omitempty"`
 }
 
 type ModelUsageStats struct {
@@ -343,6 +416,7 @@ type ProvidersModelsList struct {
 	Glm       []*ModelConfig `json:"glm,omitempty"`
 	Kimi      []*ModelConfig `json:"kimi,omitempty"`
 	Qwen      []*ModelConfig `json:"qwen,omitempty"`
+	Minimax   []*ModelConfig `json:"minimax,omitempty"`
 }
 
 type ProvidersReadinessStatus struct {
@@ -356,12 +430,14 @@ type ProvidersReadinessStatus struct {
 	Glm       bool `json:"glm"`
 	Kimi      bool `json:"kimi"`
 	Qwen      bool `json:"qwen"`
+	Minimax   bool `json:"minimax"`
 }
 
 type Query struct {
 }
 
 type ReasoningConfig struct {
+	Mode      *ReasoningMode   `json:"mode,omitempty"`
 	Effort    *ReasoningEffort `json:"effort,omitempty"`
 	MaxTokens *int             `json:"maxTokens,omitempty"`
 }
@@ -390,10 +466,12 @@ type SearchLog struct {
 }
 
 type Settings struct {
-	Debug              bool `json:"debug"`
-	AskUser            bool `json:"askUser"`
-	DockerInside       bool `json:"dockerInside"`
-	AssistantUseAgents bool `json:"assistantUseAgents"`
+	Debug              bool   `json:"debug"`
+	AskUser            bool   `json:"askUser"`
+	Version            string `json:"version"`
+	DockerInside       bool   `json:"dockerInside"`
+	IsDevelopMode      bool   `json:"isDevelopMode"`
+	AssistantUseAgents bool   `json:"assistantUseAgents"`
 }
 
 type Subscription struct {
@@ -467,6 +545,21 @@ type TestResult struct {
 	Error     *string `json:"error,omitempty"`
 }
 
+type ToolCallLog struct {
+	ID              int64          `json:"id"`
+	CallID          string         `json:"callId"`
+	Status          ToolCallStatus `json:"status"`
+	Name            string         `json:"name"`
+	Args            string         `json:"args"`
+	Result          string         `json:"result"`
+	DurationSeconds float64        `json:"durationSeconds"`
+	FlowID          int64          `json:"flowId"`
+	TaskID          *int64         `json:"taskId,omitempty"`
+	SubtaskID       *int64         `json:"subtaskId,omitempty"`
+	CreatedAt       time.Time      `json:"createdAt"`
+	UpdatedAt       time.Time      `json:"updatedAt"`
+}
+
 type ToolcallsStats struct {
 	TotalCount           int     `json:"totalCount"`
 	TotalDurationSeconds float64 `json:"totalDurationSeconds"`
@@ -497,6 +590,16 @@ type UpdateFlowTemplateInput struct {
 	Text  string `json:"text"`
 }
 
+type UpdateKnowledgeDocumentInput struct {
+	Content     string               `json:"content"`
+	Question    *string              `json:"question,omitempty"`
+	Description *string              `json:"description,omitempty"`
+	DocType     *KnowledgeDocType    `json:"docType,omitempty"`
+	GuideType   *KnowledgeGuideType  `json:"guideType,omitempty"`
+	AnswerType  *KnowledgeAnswerType `json:"answerType,omitempty"`
+	CodeLang    *string              `json:"codeLang,omitempty"`
+}
+
 type UsageStats struct {
 	TotalUsageIn       int     `json:"totalUsageIn"`
 	TotalUsageOut      int     `json:"totalUsageOut"`
@@ -517,6 +620,17 @@ type UserPrompt struct {
 	Template  string     `json:"template"`
 	CreatedAt time.Time  `json:"createdAt"`
 	UpdatedAt time.Time  `json:"updatedAt"`
+}
+
+type UserResource struct {
+	ID        int64     `json:"id"`
+	UserID    int64     `json:"userId"`
+	Name      string    `json:"name"`
+	Path      string    `json:"path"`
+	Size      int       `json:"size"`
+	IsDir     bool      `json:"isDir"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 type VectorStoreLog struct {
@@ -663,6 +777,145 @@ func (e AgentType) MarshalGQL(w io.Writer) {
 	fmt.Fprint(w, strconv.Quote(e.String()))
 }
 
+type KnowledgeAnswerType string
+
+const (
+	KnowledgeAnswerTypeGuide         KnowledgeAnswerType = "guide"
+	KnowledgeAnswerTypeVulnerability KnowledgeAnswerType = "vulnerability"
+	KnowledgeAnswerTypeCode          KnowledgeAnswerType = "code"
+	KnowledgeAnswerTypeTool          KnowledgeAnswerType = "tool"
+	KnowledgeAnswerTypeOther         KnowledgeAnswerType = "other"
+)
+
+var AllKnowledgeAnswerType = []KnowledgeAnswerType{
+	KnowledgeAnswerTypeGuide,
+	KnowledgeAnswerTypeVulnerability,
+	KnowledgeAnswerTypeCode,
+	KnowledgeAnswerTypeTool,
+	KnowledgeAnswerTypeOther,
+}
+
+func (e KnowledgeAnswerType) IsValid() bool {
+	switch e {
+	case KnowledgeAnswerTypeGuide, KnowledgeAnswerTypeVulnerability, KnowledgeAnswerTypeCode, KnowledgeAnswerTypeTool, KnowledgeAnswerTypeOther:
+		return true
+	}
+	return false
+}
+
+func (e KnowledgeAnswerType) String() string {
+	return string(e)
+}
+
+func (e *KnowledgeAnswerType) UnmarshalGQL(v interface{}) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = KnowledgeAnswerType(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid KnowledgeAnswerType", str)
+	}
+	return nil
+}
+
+func (e KnowledgeAnswerType) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+type KnowledgeDocType string
+
+const (
+	KnowledgeDocTypeAnswer KnowledgeDocType = "answer"
+	KnowledgeDocTypeGuide  KnowledgeDocType = "guide"
+	KnowledgeDocTypeCode   KnowledgeDocType = "code"
+)
+
+var AllKnowledgeDocType = []KnowledgeDocType{
+	KnowledgeDocTypeAnswer,
+	KnowledgeDocTypeGuide,
+	KnowledgeDocTypeCode,
+}
+
+func (e KnowledgeDocType) IsValid() bool {
+	switch e {
+	case KnowledgeDocTypeAnswer, KnowledgeDocTypeGuide, KnowledgeDocTypeCode:
+		return true
+	}
+	return false
+}
+
+func (e KnowledgeDocType) String() string {
+	return string(e)
+}
+
+func (e *KnowledgeDocType) UnmarshalGQL(v interface{}) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = KnowledgeDocType(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid KnowledgeDocType", str)
+	}
+	return nil
+}
+
+func (e KnowledgeDocType) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+type KnowledgeGuideType string
+
+const (
+	KnowledgeGuideTypeInstall     KnowledgeGuideType = "install"
+	KnowledgeGuideTypeConfigure   KnowledgeGuideType = "configure"
+	KnowledgeGuideTypeUse         KnowledgeGuideType = "use"
+	KnowledgeGuideTypePentest     KnowledgeGuideType = "pentest"
+	KnowledgeGuideTypeDevelopment KnowledgeGuideType = "development"
+	KnowledgeGuideTypeOther       KnowledgeGuideType = "other"
+)
+
+var AllKnowledgeGuideType = []KnowledgeGuideType{
+	KnowledgeGuideTypeInstall,
+	KnowledgeGuideTypeConfigure,
+	KnowledgeGuideTypeUse,
+	KnowledgeGuideTypePentest,
+	KnowledgeGuideTypeDevelopment,
+	KnowledgeGuideTypeOther,
+}
+
+func (e KnowledgeGuideType) IsValid() bool {
+	switch e {
+	case KnowledgeGuideTypeInstall, KnowledgeGuideTypeConfigure, KnowledgeGuideTypeUse, KnowledgeGuideTypePentest, KnowledgeGuideTypeDevelopment, KnowledgeGuideTypeOther:
+		return true
+	}
+	return false
+}
+
+func (e KnowledgeGuideType) String() string {
+	return string(e)
+}
+
+func (e *KnowledgeGuideType) UnmarshalGQL(v interface{}) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = KnowledgeGuideType(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid KnowledgeGuideType", str)
+	}
+	return nil
+}
+
+func (e KnowledgeGuideType) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
 type MessageLogType string
 
 const (
@@ -719,6 +972,49 @@ func (e *MessageLogType) UnmarshalGQL(v interface{}) error {
 }
 
 func (e MessageLogType) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+type ModelReasoningMode string
+
+const (
+	ModelReasoningModeBudget       ModelReasoningMode = "budget"
+	ModelReasoningModeAdaptive     ModelReasoningMode = "adaptive"
+	ModelReasoningModeAdaptiveOnly ModelReasoningMode = "adaptive_only"
+)
+
+var AllModelReasoningMode = []ModelReasoningMode{
+	ModelReasoningModeBudget,
+	ModelReasoningModeAdaptive,
+	ModelReasoningModeAdaptiveOnly,
+}
+
+func (e ModelReasoningMode) IsValid() bool {
+	switch e {
+	case ModelReasoningModeBudget, ModelReasoningModeAdaptive, ModelReasoningModeAdaptiveOnly:
+		return true
+	}
+	return false
+}
+
+func (e ModelReasoningMode) String() string {
+	return string(e)
+}
+
+func (e *ModelReasoningMode) UnmarshalGQL(v interface{}) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = ModelReasoningMode(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid ModelReasoningMode", str)
+	}
+	return nil
+}
+
+func (e ModelReasoningMode) MarshalGQL(w io.Writer) {
 	fmt.Fprint(w, strconv.Quote(e.String()))
 }
 
@@ -899,6 +1195,7 @@ const (
 	ProviderTypeGlm       ProviderType = "glm"
 	ProviderTypeKimi      ProviderType = "kimi"
 	ProviderTypeQwen      ProviderType = "qwen"
+	ProviderTypeMinimax   ProviderType = "minimax"
 )
 
 var AllProviderType = []ProviderType{
@@ -912,11 +1209,12 @@ var AllProviderType = []ProviderType{
 	ProviderTypeGlm,
 	ProviderTypeKimi,
 	ProviderTypeQwen,
+	ProviderTypeMinimax,
 }
 
 func (e ProviderType) IsValid() bool {
 	switch e {
-	case ProviderTypeOpenai, ProviderTypeAnthropic, ProviderTypeGemini, ProviderTypeBedrock, ProviderTypeOllama, ProviderTypeCustom, ProviderTypeDeepseek, ProviderTypeGlm, ProviderTypeKimi, ProviderTypeQwen:
+	case ProviderTypeOpenai, ProviderTypeAnthropic, ProviderTypeGemini, ProviderTypeBedrock, ProviderTypeOllama, ProviderTypeCustom, ProviderTypeDeepseek, ProviderTypeGlm, ProviderTypeKimi, ProviderTypeQwen, ProviderTypeMinimax:
 		return true
 	}
 	return false
@@ -946,12 +1244,16 @@ func (e ProviderType) MarshalGQL(w io.Writer) {
 type ReasoningEffort string
 
 const (
+	ReasoningEffortXhigh  ReasoningEffort = "xhigh"
+	ReasoningEffortMax    ReasoningEffort = "max"
 	ReasoningEffortHigh   ReasoningEffort = "high"
 	ReasoningEffortMedium ReasoningEffort = "medium"
 	ReasoningEffortLow    ReasoningEffort = "low"
 )
 
 var AllReasoningEffort = []ReasoningEffort{
+	ReasoningEffortXhigh,
+	ReasoningEffortMax,
 	ReasoningEffortHigh,
 	ReasoningEffortMedium,
 	ReasoningEffortLow,
@@ -959,7 +1261,7 @@ var AllReasoningEffort = []ReasoningEffort{
 
 func (e ReasoningEffort) IsValid() bool {
 	switch e {
-	case ReasoningEffortHigh, ReasoningEffortMedium, ReasoningEffortLow:
+	case ReasoningEffortXhigh, ReasoningEffortMax, ReasoningEffortHigh, ReasoningEffortMedium, ReasoningEffortLow:
 		return true
 	}
 	return false
@@ -983,6 +1285,49 @@ func (e *ReasoningEffort) UnmarshalGQL(v interface{}) error {
 }
 
 func (e ReasoningEffort) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+type ReasoningMode string
+
+const (
+	ReasoningModeAdaptive ReasoningMode = "adaptive"
+	ReasoningModeBudget   ReasoningMode = "budget"
+	ReasoningModeOff      ReasoningMode = "off"
+)
+
+var AllReasoningMode = []ReasoningMode{
+	ReasoningModeAdaptive,
+	ReasoningModeBudget,
+	ReasoningModeOff,
+}
+
+func (e ReasoningMode) IsValid() bool {
+	switch e {
+	case ReasoningModeAdaptive, ReasoningModeBudget, ReasoningModeOff:
+		return true
+	}
+	return false
+}
+
+func (e ReasoningMode) String() string {
+	return string(e)
+}
+
+func (e *ReasoningMode) UnmarshalGQL(v interface{}) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = ReasoningMode(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid ReasoningMode", str)
+	}
+	return nil
+}
+
+func (e ReasoningMode) MarshalGQL(w io.Writer) {
 	fmt.Fprint(w, strconv.Quote(e.String()))
 }
 
@@ -1241,6 +1586,51 @@ func (e *TokenStatus) UnmarshalGQL(v interface{}) error {
 }
 
 func (e TokenStatus) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+type ToolCallStatus string
+
+const (
+	ToolCallStatusReceived ToolCallStatus = "received"
+	ToolCallStatusRunning  ToolCallStatus = "running"
+	ToolCallStatusFinished ToolCallStatus = "finished"
+	ToolCallStatusFailed   ToolCallStatus = "failed"
+)
+
+var AllToolCallStatus = []ToolCallStatus{
+	ToolCallStatusReceived,
+	ToolCallStatusRunning,
+	ToolCallStatusFinished,
+	ToolCallStatusFailed,
+}
+
+func (e ToolCallStatus) IsValid() bool {
+	switch e {
+	case ToolCallStatusReceived, ToolCallStatusRunning, ToolCallStatusFinished, ToolCallStatusFailed:
+		return true
+	}
+	return false
+}
+
+func (e ToolCallStatus) String() string {
+	return string(e)
+}
+
+func (e *ToolCallStatus) UnmarshalGQL(v interface{}) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = ToolCallStatus(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid ToolCallStatus", str)
+	}
+	return nil
+}
+
+func (e ToolCallStatus) MarshalGQL(w io.Writer) {
 	fmt.Fprint(w, strconv.Quote(e.String()))
 }
 

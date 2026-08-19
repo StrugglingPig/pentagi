@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math/big"
 	"path"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"text/template"
 )
 
@@ -81,10 +83,12 @@ var PromptVariables = map[PromptType][]string{
 		"AskUserToolName",
 		"AskUserEnabled",
 		"ExecutionContext",
+		"Cwd",
 		"Lang",
 		"DockerImage",
 		"CurrentTime",
 		"ToolPlaceholder",
+		"UserFiles",
 	},
 	PromptTypeAssistant: {
 		"SearchToolName",
@@ -95,11 +99,7 @@ var PromptVariables = map[PromptType][]string{
 		"MaintenanceToolName",
 		"TerminalToolName",
 		"FileToolName",
-		"GoogleToolName",
-		"DuckDuckGoToolName",
-		"TavilyToolName",
-		"TraversaalToolName",
-		"PerplexityToolName",
+		"WebSearchToolName",
 		"BrowserToolName",
 		"SearchInMemoryToolName",
 		"SearchGuideToolName",
@@ -114,9 +114,17 @@ var PromptVariables = map[PromptType][]string{
 		"ExecutionContext",
 		"Lang",
 		"CurrentTime",
+		"FlowManagerEnabled",
+		"GetFlowStatusToolName",
+		"StopFlowToolName",
+		"SubmitFlowInputToolName",
+		"PatchFlowSubtasksToolName",
+		"WaitFlowCompletionToolName",
+		"UserFiles",
 	},
 	PromptTypePentester: {
 		"HackResultToolName",
+		"WebSearchToolName",
 		"SearchGuideToolName",
 		"StoreGuideToolName",
 		"GraphitiEnabled",
@@ -126,6 +134,8 @@ var PromptVariables = map[PromptType][]string{
 		"AdviceToolName",
 		"MemoristToolName",
 		"MaintenanceToolName",
+		"TerminalToolName",
+		"FileToolName",
 		"SummarizationToolName",
 		"SummarizedContentPrefix",
 		"IsDefaultDockerImage",
@@ -136,6 +146,7 @@ var PromptVariables = map[PromptType][]string{
 		"Lang",
 		"CurrentTime",
 		"ToolPlaceholder",
+		"UserFiles",
 	},
 	PromptTypeQuestionPentester: {
 		"Question",
@@ -150,6 +161,8 @@ var PromptVariables = map[PromptType][]string{
 		"AdviceToolName",
 		"MemoristToolName",
 		"MaintenanceToolName",
+		"TerminalToolName",
+		"FileToolName",
 		"SummarizationToolName",
 		"SummarizedContentPrefix",
 		"DockerImage",
@@ -159,6 +172,7 @@ var PromptVariables = map[PromptType][]string{
 		"Lang",
 		"CurrentTime",
 		"ToolPlaceholder",
+		"UserFiles",
 	},
 	PromptTypeQuestionCoder: {
 		"Question",
@@ -170,6 +184,8 @@ var PromptVariables = map[PromptType][]string{
 		"SearchToolName",
 		"AdviceToolName",
 		"MemoristToolName",
+		"TerminalToolName",
+		"FileToolName",
 		"SummarizationToolName",
 		"SummarizedContentPrefix",
 		"DockerImage",
@@ -179,6 +195,7 @@ var PromptVariables = map[PromptType][]string{
 		"Lang",
 		"CurrentTime",
 		"ToolPlaceholder",
+		"UserFiles",
 	},
 	PromptTypeQuestionInstaller: {
 		"Question",
@@ -190,9 +207,11 @@ var PromptVariables = map[PromptType][]string{
 		"SummarizationToolName",
 		"SummarizedContentPrefix",
 		"ExecutionContext",
+		"Cwd",
 		"Lang",
 		"CurrentTime",
 		"ToolPlaceholder",
+		"UserFiles",
 	},
 	PromptTypeQuestionSearcher: {
 		"Question",
@@ -214,6 +233,7 @@ var PromptVariables = map[PromptType][]string{
 		"Lang",
 		"CurrentTime",
 		"ToolPlaceholder",
+		"UserFiles",
 	},
 	PromptTypeQuestionMemorist: {
 		"Question",
@@ -238,6 +258,7 @@ var PromptVariables = map[PromptType][]string{
 		"DockerImage",
 		"Cwd",
 		"ContainerPorts",
+		"UserFiles",
 	},
 	PromptTypeQuestionAdviser: {
 		"InitiatorAgent",
@@ -255,10 +276,12 @@ var PromptVariables = map[PromptType][]string{
 		"SummarizationToolName",
 		"SummarizedContentPrefix",
 		"DockerImage",
+		"Cwd",
 		"Lang",
 		"CurrentTime",
 		"N",
 		"ToolPlaceholder",
+		"UserFiles",
 	},
 	PromptTypeSubtasksGenerator: {
 		"Task",
@@ -274,10 +297,12 @@ var PromptVariables = map[PromptType][]string{
 		"SummarizationToolName",
 		"SummarizedContentPrefix",
 		"DockerImage",
+		"Cwd",
 		"Lang",
 		"CurrentTime",
 		"N",
 		"ToolPlaceholder",
+		"UserFiles",
 	},
 	PromptTypeSubtasksRefiner: {
 		"Task",
@@ -291,9 +316,11 @@ var PromptVariables = map[PromptType][]string{
 		"ReportResultToolName",
 		"SummarizationToolName",
 		"SummarizedContentPrefix",
+		"Cwd",
 		"Lang",
 		"N",
 		"ToolPlaceholder",
+		"UserFiles",
 	},
 	PromptTypeTaskReporter: {
 		"Task",
@@ -318,6 +345,7 @@ var PromptVariables = map[PromptType][]string{
 		"SummarizationToolName",
 		"SummarizedContentPrefix",
 		"ExecutionContext",
+		"Cwd",
 		"Lang",
 		"CurrentTime",
 		"ToolPlaceholder",
@@ -327,6 +355,7 @@ var PromptVariables = map[PromptType][]string{
 		"FileToolName",
 		"TerminalToolName",
 		"BrowserToolName",
+		"UserFiles",
 	},
 	PromptTypeQuestionEnricher: {
 		"Question",
@@ -636,20 +665,9 @@ func (dp *defaultPrompter) RenderTemplate(promptType PromptType, params any) (st
 }
 
 func (dp *defaultPrompter) DumpTemplates() ([]byte, error) {
-	prompts, err := promptTemplates.ReadDir("prompts")
+	promptsMap, err := LoadDefaultPromptsMap()
 	if err != nil {
-		return nil, fmt.Errorf("failed to read templates: %w", err)
-	}
-
-	promptsMap := make(PromptsMap)
-	for _, prompt := range prompts {
-		promptBytes, err := promptTemplates.ReadFile(path.Join("prompts", prompt.Name()))
-		if err != nil {
-			return nil, fmt.Errorf("failed to read template: %w", err)
-		}
-
-		promptName := strings.TrimSuffix(prompt.Name(), ".tmpl")
-		promptsMap[PromptType(promptName)] = string(promptBytes)
+		return nil, err
 	}
 
 	blob, err := json.Marshal(promptsMap)
@@ -658,6 +676,54 @@ func (dp *defaultPrompter) DumpTemplates() ([]byte, error) {
 	}
 
 	return blob, nil
+}
+
+// defaultPromptsCache holds the singleton default prompts map loaded once
+// from the embedded FS. String values are immutable in Go, so the map itself
+// is read-only after initialisation and safe to read from multiple goroutines.
+var (
+	defaultPromptsCache     PromptsMap
+	defaultPromptsCacheOnce sync.Once
+	defaultPromptsCacheErr  error
+)
+
+// LoadDefaultPromptsMap returns a PromptsMap populated from the embedded
+// default templates. The underlying template strings are loaded only once;
+// every caller receives a shallow copy of the map so it can safely overlay
+// user-specific overrides without affecting the shared cache or other callers.
+// String values in Go are immutable, so the copy shares string memory with
+// the cache rather than duplicating template content.
+func LoadDefaultPromptsMap() (PromptsMap, error) {
+	defaultPromptsCacheOnce.Do(func() {
+		prompts, err := promptTemplates.ReadDir("prompts")
+		if err != nil {
+			defaultPromptsCacheErr = fmt.Errorf("failed to read templates: %w", err)
+			return
+		}
+
+		m := make(PromptsMap, len(prompts))
+		for _, prompt := range prompts {
+			promptBytes, err := promptTemplates.ReadFile(path.Join("prompts", prompt.Name()))
+			if err != nil {
+				defaultPromptsCacheErr = fmt.Errorf("failed to read template: %w", err)
+				return
+			}
+			promptName := strings.TrimSuffix(prompt.Name(), ".tmpl")
+			m[PromptType(promptName)] = string(promptBytes)
+		}
+		defaultPromptsCache = m
+	})
+
+	if defaultPromptsCacheErr != nil {
+		return nil, defaultPromptsCacheErr
+	}
+
+	// Return a shallow copy: new map header + copied string references.
+	// Callers can mutate keys freely; the cached originals are untouched.
+	copyMap := make(PromptsMap, len(defaultPromptsCache))
+	maps.Copy(copyMap, defaultPromptsCache)
+
+	return copyMap, nil
 }
 
 func RenderPrompt(name, prompt string, params any) (string, error) {

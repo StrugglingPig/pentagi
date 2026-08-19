@@ -1,8 +1,8 @@
 import { zodResolver } from '@hookform/resolvers/zod';
-import debounce from 'lodash/debounce';
 import { ChevronDown, ListFilter, Search, Wrench, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useForm } from 'react-hook-form';
+import { useDebouncedCallback } from 'use-debounce';
 import { z } from 'zod';
 
 import { Button } from '@/components/ui/button';
@@ -25,7 +25,7 @@ const searchFormSchema = z.object({
     search: z.string(),
 });
 
-const FlowTools = () => {
+function FlowTools() {
     const { flowData, flowId } = useFlow();
 
     const logs = useMemo(() => flowData?.searchLogs ?? [], [flowData?.searchLogs]);
@@ -47,16 +47,10 @@ const FlowTools = () => {
     const searchValue = form.watch('search');
     const filter = form.watch('filter');
 
-    // Create debounced function to update search value
-    const debouncedUpdateSearch = useMemo(
-        () =>
-            debounce((value: string) => {
-                setDebouncedSearchValue(value);
-            }, 500),
-        [],
-    );
+    const debouncedUpdateSearch = useDebouncedCallback((value: string) => {
+        setDebouncedSearchValue(value);
+    }, 500);
 
-    // Update debounced search value when input value changes
     useEffect(() => {
         debouncedUpdateSearch(searchValue);
 
@@ -65,14 +59,12 @@ const FlowTools = () => {
         };
     }, [searchValue, debouncedUpdateSearch]);
 
-    // Cleanup debounced function on unmount
     useEffect(() => {
         return () => {
             debouncedUpdateSearch.cancel();
         };
     }, [debouncedUpdateSearch]);
 
-    // Clear search when flow changes to prevent stale search state
     useEffect(() => {
         form.reset({
             filter: {
@@ -85,7 +77,6 @@ const FlowTools = () => {
         debouncedUpdateSearch.cancel();
     }, [flowId, form, debouncedUpdateSearch]);
 
-    // Check if any filters are active
     const hasActiveFilters = useMemo(() => {
         const hasSearch = !!searchValue.trim();
         const hasTaskFilters = !!(filter?.taskIds?.length || filter?.subtaskIds?.length);
@@ -93,14 +84,11 @@ const FlowTools = () => {
         return hasSearch || hasTaskFilters;
     }, [searchValue, filter]);
 
-    // Memoize filtered logs to avoid recomputing on every render
-    // Use debouncedSearchValue for filtering to improve performance
     const filteredLogs = useMemo(() => {
         const search = debouncedSearchValue.toLowerCase().trim();
 
         let filtered = logs || [];
 
-        // Filter by search
         if (search) {
             filtered = filtered.filter((log) => {
                 return (
@@ -113,7 +101,6 @@ const FlowTools = () => {
             });
         }
 
-        // Filter by selected tasks and subtasks
         if (filter?.taskIds?.length || filter?.subtaskIds?.length) {
             const selectedTaskIds = new Set(filter.taskIds ?? []);
             const selectedSubtaskIds = new Set(filter.subtaskIds ?? []);
@@ -136,7 +123,6 @@ const FlowTools = () => {
 
     const hasLogs = filteredLogs && filteredLogs.length > 0;
 
-    // Reset filters handler
     const handleResetFilters = () => {
         form.reset({
             filter: {
@@ -172,6 +158,7 @@ const FlowTools = () => {
                                         {field.value && (
                                             <InputGroupAddon align="inline-end">
                                                 <InputGroupButton
+                                                    aria-label="Clear tool search"
                                                     onClick={() => {
                                                         form.reset({ search: '' });
                                                         setDebouncedSearchValue('');
@@ -221,6 +208,7 @@ const FlowTools = () => {
 
                     {!isScrolledToBottom && (
                         <Button
+                            aria-label="Scroll to latest tool log"
                             className="absolute right-4 bottom-4 z-10 shadow-md hover:shadow-lg"
                             onClick={() => scrollToEnd()}
                             size="icon-sm"
@@ -268,6 +256,6 @@ const FlowTools = () => {
             )}
         </div>
     );
-};
+}
 
 export default FlowTools;

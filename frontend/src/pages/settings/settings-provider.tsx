@@ -1,54 +1,126 @@
-import { zodResolver } from '@hookform/resolvers/zod';
+import { useMutation, useQuery } from '@apollo/client/react';
 import {
-    AlertCircle,
     Check,
     CheckCircle,
-    ChevronsUpDown,
+    ChevronDown,
     Clock,
-    Cpu,
+    Ellipsis,
     Lightbulb,
-    Loader2,
     Play,
+    Plug,
     Save,
     Trash2,
     XCircle,
 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { useController, useForm, useFormState, useWatch } from 'react-hook-form';
+import { type ComponentProps, type FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import {
+    type Control,
+    type FieldErrors,
+    type FieldPath,
+    type FieldValues,
+    useController,
+    type UseFormSetValue,
+    useFormState,
+    useWatch,
+} from 'react-hook-form';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { toast } from 'sonner';
 import { z } from 'zod';
 
-import type {
-    AgentConfigInput,
-    AgentsConfigInput,
-    ProviderConfigFragmentFragment,
-    ProviderType,
-} from '@/graphql/types';
+import type { AgentConfigInput, AgentsConfigInput, ProviderConfigFragmentFragment } from '@/graphql/types';
 
+import {
+    AppHeader,
+    AppHeaderAction,
+    AppHeaderActions,
+    AppHeaderContent,
+    AppHeaderTitle,
+} from '@/components/layouts/app/app-header';
 import ConfirmationDialog from '@/components/shared/confirmation-dialog';
+import { DetailSplitLayout } from '@/components/shared/detail-split-layout';
+import { ErrorState } from '@/components/shared/error-state';
+import { LoadingState } from '@/components/shared/loading-state';
+import { UnsavedChangesDialog, useUnsavedChangesGuard } from '@/components/shared/unsaved-changes';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
+import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '@/components/ui/input-group';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { StatusCard } from '@/components/ui/status-card';
+import { Spinner } from '@/components/ui/spinner';
+import { Textarea } from '@/components/ui/textarea';
 import {
     AgentConfigType,
+    CreateProviderDocument,
+    DeleteProviderDocument,
+    ModelReasoningMode,
+    ProviderType,
     ReasoningEffort,
-    useCreateProviderMutation,
-    useDeleteProviderMutation,
-    useSettingsProvidersQuery,
-    useTestAgentMutation,
-    useTestProviderMutation,
-    useUpdateProviderMutation,
+    ReasoningMode,
+    SettingsProvidersDocument,
+    TestAgentDocument,
+    TestProviderDocument,
+    UpdateProviderDocument,
 } from '@/graphql/types';
+import { useAppForm } from '@/hooks/use-app-form';
+import { useBreakpoint } from '@/hooks/use-breakpoint';
+import { routes } from '@/lib/routes';
 import { cn } from '@/lib/utils';
 
-interface BaseFieldProps extends ControllerProps {
+interface ProviderTest {
+    error?: null | string;
+    latency?: null | number;
+    name?: null | string;
+    reasoning?: boolean | null;
+    result?: boolean | null;
+    streaming?: boolean | null;
+    type?: null | string;
+}
+
+type ProviderTestResults = Record<string, null | undefined | { tests?: null | ProviderTest[] }>;
+
+const formatFieldName = (fieldPath: string): string =>
+    fieldPath
+        .split('.')
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1).replaceAll(/([A-Z])/g, ' $1'))
+        .join(' → ');
+
+const getErrorMessage = (error: unknown): string | undefined =>
+    typeof error === 'object' && error !== null && typeof (error as { message?: unknown }).message === 'string'
+        ? (error as { message: string }).message
+        : undefined;
+
+const formatFormErrors = (errors: Record<string, unknown>, prefix = ''): string =>
+    Object.entries(errors)
+        .flatMap(([field, error]) => {
+            const path = prefix ? `${prefix}.${field}` : field;
+            const message = getErrorMessage(error);
+
+            if (message) {
+                return [`• ${formatFieldName(path)}: ${message}`];
+            }
+
+            if (error && typeof error === 'object') {
+                const nested = formatFormErrors(error as Record<string, unknown>, path);
+
+                return nested ? [nested] : [];
+            }
+
+            return [];
+        })
+        .join('\n');
+
+interface BaseFieldProps<T extends FieldValues = FieldValues> extends ControllerProps<T> {
     label: string;
 }
 
@@ -56,20 +128,47 @@ interface BaseInputProps {
     placeholder?: string;
 }
 
-// Universal field components using useController
-interface ControllerProps {
-    control: any;
+interface ControllerProps<T extends FieldValues = FieldValues> {
+    control: Control<T>;
     disabled?: boolean;
-    name: string;
+    name: FieldPath<T>;
 }
 
-interface FormInputNumberItemProps extends BaseFieldProps, NumberInputProps {
+interface FormComboboxItemProps<T extends FieldValues = FieldValues> extends BaseFieldProps<T>, BaseInputProps {
+    allowCustom?: boolean;
+    contentClass?: string;
+    description?: string;
+    options: string[];
+}
+
+interface FormInputNumberItemProps<T extends FieldValues = FieldValues> extends BaseFieldProps<T>, NumberInputProps {
     description?: string;
     valueType?: 'float' | 'integer';
 }
 
-interface FormInputStringItemProps extends BaseFieldProps, BaseInputProps {
+interface FormInputStringItemProps<T extends FieldValues = FieldValues> extends BaseFieldProps<T>, BaseInputProps {
     description?: string;
+}
+
+interface FormModelComboboxItemProps<T extends FieldValues = FieldValues> extends BaseFieldProps<T>, BaseInputProps {
+    allowCustom?: boolean;
+    contentClass?: string;
+    description?: string;
+    onOptionSelect?: (option: ModelOption) => void;
+    options: ModelOption[];
+}
+
+interface ModelOption {
+    name: string;
+    price?: null | { cacheRead: number; cacheWrite: number; input: number; output: number };
+    reasoning?: null | {
+        cannotDisable?: boolean | null;
+        defaultOn?: boolean | null;
+        efforts?: null | ReasoningEffort[];
+        mode?: ModelReasoningMode | null;
+        supported?: boolean | null;
+    };
+    thinking?: boolean | null;
 }
 
 interface NumberInputProps extends BaseInputProps {
@@ -80,102 +179,7 @@ interface NumberInputProps extends BaseInputProps {
 
 type Provider = ProviderConfigFragmentFragment;
 
-const FormInputStringItem: React.FC<FormInputStringItemProps> = ({
-    control,
-    description,
-    disabled,
-    label,
-    name,
-    placeholder,
-}) => {
-    const { field, fieldState } = useController({
-        control,
-        defaultValue: undefined,
-        disabled,
-        name,
-    });
-
-    const inputProps = { placeholder };
-
-    return (
-        <FormItem>
-            <FormLabel>{label}</FormLabel>
-            <FormControl>
-                <Input
-                    {...field}
-                    {...inputProps}
-                    value={field.value ?? ''}
-                />
-            </FormControl>
-            {description && <FormDescription>{description}</FormDescription>}
-            {fieldState.error && <FormMessage>{fieldState.error.message}</FormMessage>}
-        </FormItem>
-    );
-};
-
-const FormInputNumberItem: React.FC<FormInputNumberItemProps> = ({
-    control,
-    description,
-    disabled,
-    label,
-    max,
-    min,
-    name,
-    placeholder,
-    step,
-    valueType = 'float',
-}) => {
-    const { field, fieldState } = useController({
-        control,
-        defaultValue: undefined,
-        disabled,
-        name,
-    });
-
-    const parseValue = (value: string) => {
-        if (value === '') {
-            return null;
-        }
-
-        return valueType === 'float' ? Number.parseFloat(value) : Number.parseInt(value);
-    };
-
-    const inputProps = {
-        max,
-        min,
-        placeholder,
-        step,
-        type: 'number' as const,
-    };
-
-    return (
-        <FormItem>
-            <FormLabel>{label}</FormLabel>
-            <FormControl>
-                <Input
-                    {...field}
-                    {...inputProps}
-                    onChange={(event) => {
-                        const { value } = event.target;
-                        field.onChange(parseValue(value));
-                    }}
-                    value={field.value ?? ''}
-                />
-            </FormControl>
-            {description && <FormDescription>{description}</FormDescription>}
-            {fieldState.error && <FormMessage>{fieldState.error.message}</FormMessage>}
-        </FormItem>
-    );
-};
-
-interface FormComboboxItemProps extends BaseFieldProps, BaseInputProps {
-    allowCustom?: boolean;
-    contentClass?: string;
-    description?: string;
-    options: string[];
-}
-
-const FormComboboxItem: React.FC<FormComboboxItemProps> = ({
+function FormComboboxItem<T extends FieldValues = FieldValues>({
     allowCustom = true,
     contentClass,
     control,
@@ -185,7 +189,7 @@ const FormComboboxItem: React.FC<FormComboboxItemProps> = ({
     name,
     options,
     placeholder,
-}) => {
+}: FormComboboxItemProps<T>) {
     const { field, fieldState } = useController({
         control,
         defaultValue: undefined,
@@ -196,7 +200,6 @@ const FormComboboxItem: React.FC<FormComboboxItemProps> = ({
     const [isOpen, setIsOpen] = useState(false);
     const [search, setSearch] = useState('');
 
-    // Filter options based on search
     const filteredOptions = options.filter((option) => option?.toLowerCase().includes(search?.toLowerCase()));
 
     const displayValue = field.value ?? '';
@@ -211,12 +214,15 @@ const FormComboboxItem: React.FC<FormComboboxItemProps> = ({
                 >
                     <PopoverTrigger asChild>
                         <Button
-                            className={cn('w-full justify-between', !displayValue && 'text-muted-foreground')}
+                            className={cn(
+                                'h-9 w-full justify-between bg-transparent px-3 font-normal hover:bg-transparent',
+                                !displayValue && 'text-muted-foreground',
+                            )}
                             disabled={disabled}
                             variant="outline"
                         >
                             {displayValue || placeholder}
-                            <ChevronsUpDown className="opacity-50" />
+                            <ChevronDown className="size-4 opacity-50" />
                         </Button>
                     </PopoverTrigger>
                     <PopoverContent
@@ -284,23 +290,97 @@ const FormComboboxItem: React.FC<FormComboboxItemProps> = ({
             {fieldState.error && <FormMessage>{fieldState.error.message}</FormMessage>}
         </FormItem>
     );
-};
-
-interface FormModelComboboxItemProps extends BaseFieldProps, BaseInputProps {
-    allowCustom?: boolean;
-    contentClass?: string;
-    description?: string;
-    onOptionSelect?: (option: ModelOption) => void;
-    options: ModelOption[];
 }
 
-interface ModelOption {
-    name: string;
-    price?: null | { cacheRead: number; cacheWrite: number; input: number; output: number };
-    thinking?: boolean;
+function FormInputNumberItem<T extends FieldValues = FieldValues>({
+    control,
+    description,
+    disabled,
+    label,
+    max,
+    min,
+    name,
+    placeholder,
+    step,
+    valueType = 'float',
+}: FormInputNumberItemProps<T>) {
+    const { field, fieldState } = useController({
+        control,
+        defaultValue: undefined,
+        disabled,
+        name,
+    });
+
+    const parseValue = (value: string) => {
+        if (value === '') {
+            return null;
+        }
+
+        return valueType === 'float' ? Number.parseFloat(value) : Number.parseInt(value);
+    };
+
+    const inputProps = {
+        max,
+        min,
+        placeholder,
+        step,
+        type: 'number' as const,
+    };
+
+    return (
+        <FormItem>
+            <FormLabel>{label}</FormLabel>
+            <FormControl>
+                <Input
+                    {...field}
+                    {...inputProps}
+                    onChange={(event) => {
+                        const { value } = event.target;
+                        field.onChange(parseValue(value));
+                    }}
+                    value={field.value ?? ''}
+                />
+            </FormControl>
+            {description && <FormDescription>{description}</FormDescription>}
+            {fieldState.error && <FormMessage>{fieldState.error.message}</FormMessage>}
+        </FormItem>
+    );
 }
 
-const FormModelComboboxItem: React.FC<FormModelComboboxItemProps> = ({
+function FormInputStringItem<T extends FieldValues = FieldValues>({
+    control,
+    description,
+    disabled,
+    label,
+    name,
+    placeholder,
+}: FormInputStringItemProps<T>) {
+    const { field, fieldState } = useController({
+        control,
+        defaultValue: undefined,
+        disabled,
+        name,
+    });
+
+    const inputProps = { placeholder };
+
+    return (
+        <FormItem>
+            <FormLabel>{label}</FormLabel>
+            <FormControl>
+                <Input
+                    {...field}
+                    {...inputProps}
+                    value={field.value ?? ''}
+                />
+            </FormControl>
+            {description && <FormDescription>{description}</FormDescription>}
+            {fieldState.error && <FormMessage>{fieldState.error.message}</FormMessage>}
+        </FormItem>
+    );
+}
+
+function FormModelComboboxItem<T extends FieldValues = FieldValues>({
     allowCustom = true,
     contentClass,
     control,
@@ -311,7 +391,7 @@ const FormModelComboboxItem: React.FC<FormModelComboboxItemProps> = ({
     onOptionSelect,
     options,
     placeholder,
-}) => {
+}: FormModelComboboxItemProps<T>) {
     const { field, fieldState } = useController({
         control,
         defaultValue: undefined,
@@ -322,13 +402,13 @@ const FormModelComboboxItem: React.FC<FormModelComboboxItemProps> = ({
     const [isOpen, setIsOpen] = useState(false);
     const [search, setSearch] = useState('');
 
-    // Filter options based on search
     const filteredOptions = options.filter((option) => option.name?.toLowerCase().includes(search?.toLowerCase()));
 
     const displayValue = field.value ?? '';
 
-    // Format price for display
-    const formatPrice = (price?: null | { cacheRead: number; cacheWrite: number; input: number; output: number }): string => {
+    const formatPrice = (
+        price?: null | { cacheRead: number; cacheWrite: number; input: number; output: number },
+    ): string => {
         if (!price || ((!price.input || price.input === 0) && (!price.output || price.output === 0))) {
             return 'free';
         }
@@ -338,8 +418,7 @@ const FormModelComboboxItem: React.FC<FormModelComboboxItemProps> = ({
         };
 
         const basePrice = `$${formatValue(price.input)}/$${formatValue(price.output)}`;
-        
-        // Add cache prices if available
+
         const hasCachePrices = (price.cacheRead && price.cacheRead > 0) || (price.cacheWrite && price.cacheWrite > 0);
 
         if (hasCachePrices) {
@@ -367,199 +446,227 @@ const FormModelComboboxItem: React.FC<FormModelComboboxItemProps> = ({
                     onOpenChange={setIsOpen}
                     open={isOpen}
                 >
-                    <div className="flex w-full">
-                        {/* Input field - main control */}
-                        <Input
-                            className="rounded-r-none border-r-0 focus-visible:z-10"
+                    <InputGroup>
+                        <InputGroupInput
                             disabled={disabled}
-                            onChange={(event) => field.onChange(event.target.value)}
+                            onChange={(event) => {
+                                const { value } = event.target;
+                                field.onChange(value);
+                                const matched = options.find((option) => option.name === value);
+
+                                if (matched) {
+                                    onOptionSelect?.(matched);
+                                }
+                            }}
                             placeholder={placeholder}
                             value={displayValue}
                         />
-                        {/* Dropdown trigger button */}
-                        <PopoverTrigger asChild>
-                            <Button
-                                className="rounded-l-none border-l-0 px-3 hover:z-10"
-                                disabled={disabled}
-                                type="button"
-                                variant="outline"
-                            >
-                                <ChevronsUpDown className="size-4 opacity-50" />
-                            </Button>
-                        </PopoverTrigger>
-                        <PopoverContent
-                            align="end"
-                            className={cn(contentClass, 'w-80 p-0 sm:w-[480px] md:w-[640px]')}
-                        >
-                            <Command>
-                                <CommandInput
-                                    className="h-9"
-                                    onValueChange={setSearch}
-                                    placeholder={`Search ${label.toLowerCase()}...`}
-                                    value={search}
-                                />
-                                <CommandList>
-                                    <CommandEmpty>
-                                        <div className="py-2 text-center">
-                                            <p className="text-muted-foreground text-sm">
-                                                No {label.toLowerCase()} found.
-                                            </p>
-                                            {search && allowCustom && (
-                                                <Button
-                                                    className="mt-2"
-                                                    onClick={() => {
-                                                        field.onChange(search);
-                                                        setIsOpen(false);
-                                                        setSearch('');
-                                                    }}
-                                                    size="sm"
-                                                    variant="ghost"
-                                                >
-                                                    Use "{search}" as custom {label.toLowerCase()}
-                                                </Button>
-                                            )}
-                                        </div>
-                                    </CommandEmpty>
-                                    <CommandGroup>
-                                        {filteredOptions.map((option) => (
-                                            <CommandItem
-                                                key={option.name}
-                                                onSelect={() => {
-                                                    field.onChange(option.name);
-                                                    onOptionSelect?.(option);
+                        <InputGroupAddon align="inline-end">
+                            <PopoverTrigger asChild>
+                                <InputGroupButton
+                                    aria-label={`Open ${label.toLowerCase()} list`}
+                                    disabled={disabled}
+                                    size="icon-sm"
+                                >
+                                    <ChevronDown className="size-4 opacity-50" />
+                                </InputGroupButton>
+                            </PopoverTrigger>
+                        </InputGroupAddon>
+                    </InputGroup>
+                    <PopoverContent
+                        align="end"
+                        className={cn(contentClass, 'w-80 p-0 sm:w-[480px] md:w-[640px]')}
+                    >
+                        <Command>
+                            <CommandInput
+                                className="h-9"
+                                onValueChange={setSearch}
+                                placeholder={`Search ${label.toLowerCase()}...`}
+                                value={search}
+                            />
+                            <CommandList>
+                                <CommandEmpty>
+                                    <div className="py-2 text-center">
+                                        <p className="text-muted-foreground text-sm">No {label.toLowerCase()} found.</p>
+                                        {search && allowCustom && (
+                                            <Button
+                                                className="mt-2"
+                                                onClick={() => {
+                                                    field.onChange(search);
+                                                    onOptionSelect?.({ name: search });
                                                     setIsOpen(false);
                                                     setSearch('');
                                                 }}
-                                                value={option.name}
+                                                size="sm"
+                                                variant="ghost"
                                             >
-                                                <div className="flex w-full min-w-0 items-center justify-between gap-2">
-                                                    <div className="flex min-w-0 items-center gap-2">
-                                                        <span className="truncate">{option.name}</span>
-                                                        {option.thinking && (
-                                                            <Lightbulb className="text-muted-foreground size-3" />
-                                                        )}
-                                                    </div>
-                                                    <span className="text-muted-foreground shrink-0 text-xs whitespace-nowrap">
-                                                        {formatPrice(option.price)}
-                                                    </span>
-                                                </div>
-                                                <Check
-                                                    className={cn(
-                                                        'ml-auto',
-                                                        displayValue === option.name ? 'opacity-100' : 'opacity-0',
+                                                Use "{search}" as custom {label.toLowerCase()}
+                                            </Button>
+                                        )}
+                                    </div>
+                                </CommandEmpty>
+                                <CommandGroup>
+                                    {filteredOptions.map((option) => (
+                                        <CommandItem
+                                            key={option.name}
+                                            onSelect={() => {
+                                                field.onChange(option.name);
+                                                onOptionSelect?.(option);
+                                                setIsOpen(false);
+                                                setSearch('');
+                                            }}
+                                            value={option.name}
+                                        >
+                                            <div className="flex w-full min-w-0 items-center justify-between gap-2">
+                                                <div className="flex min-w-0 items-center gap-2">
+                                                    <span className="truncate">{option.name}</span>
+                                                    {option.thinking && (
+                                                        <Lightbulb className="text-muted-foreground size-3" />
                                                     )}
-                                                />
-                                            </CommandItem>
-                                        ))}
-                                    </CommandGroup>
-                                </CommandList>
-                            </Command>
-                        </PopoverContent>
-                    </div>
+                                                </div>
+                                                <span className="text-muted-foreground shrink-0 text-xs whitespace-nowrap">
+                                                    {formatPrice(option.price)}
+                                                </span>
+                                            </div>
+                                            <Check
+                                                className={cn(
+                                                    'ml-auto',
+                                                    displayValue === option.name ? 'opacity-100' : 'opacity-0',
+                                                )}
+                                            />
+                                        </CommandItem>
+                                    ))}
+                                </CommandGroup>
+                            </CommandList>
+                        </Command>
+                    </PopoverContent>
                 </Popover>
             </FormControl>
             {description && <FormDescription>{description}</FormDescription>}
             {fieldState.error && <FormMessage>{fieldState.error.message}</FormMessage>}
         </FormItem>
     );
-};
+}
 
-// Define agent configuration schema
+function FormTextareaItem<T extends FieldValues = FieldValues>({
+    control,
+    description,
+    disabled,
+    label,
+    name,
+    placeholder,
+}: FormInputStringItemProps<T>) {
+    const { field, fieldState } = useController({ control, defaultValue: undefined, disabled, name });
+
+    return (
+        <FormItem>
+            <FormLabel>{label}</FormLabel>
+            <FormControl>
+                <Textarea
+                    {...field}
+                    aria-invalid={fieldState.error ? true : undefined}
+                    className="font-mono text-xs"
+                    maxHeight={320}
+                    minHeight={80}
+                    placeholder={placeholder}
+                    value={field.value ?? ''}
+                />
+            </FormControl>
+            {description && <FormDescription>{description}</FormDescription>}
+            {fieldState.error && <FormMessage>{fieldState.error.message}</FormMessage>}
+        </FormItem>
+    );
+}
+
+const optionalNumber = z.number().nullable().optional();
+
+// Only a JSON object round-trips: extraBody merges into the request body as key/value pairs.
+export const optionalJsonObject = z
+    .string()
+    .optional()
+    .refine(
+        (value) => {
+            if (!value?.trim()) {
+                return true;
+            }
+
+            try {
+                const parsed: unknown = JSON.parse(value);
+
+                return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed);
+            } catch {
+                return false;
+            }
+        },
+        { message: 'Must be a valid JSON object' },
+    );
+
+const requiredString = (message: string) =>
+    z
+        .string()
+        .optional()
+        .transform((value) => value ?? '')
+        .pipe(z.string().min(1, message));
+
 const agentConfigSchema = z
     .object({
-        frequencyPenalty: z.preprocess(
-            (value) => (value === '' || value === undefined ? null : value),
-            z.number().nullable().optional(),
-        ),
-        maxLength: z.preprocess(
-            (value) => (value === '' || value === undefined ? null : value),
-            z.number().nullable().optional(),
-        ),
-        maxTokens: z.preprocess(
-            (value) => (value === '' || value === undefined ? null : value),
-            z.number().nullable().optional(),
-        ),
-        minLength: z.preprocess(
-            (value) => (value === '' || value === undefined ? null : value),
-            z.number().nullable().optional(),
-        ),
-        model: z.preprocess((value) => value || '', z.string().min(1, 'Model is required')),
-        presencePenalty: z.preprocess(
-            (value) => (value === '' || value === undefined ? null : value),
-            z.number().nullable().optional(),
-        ),
+        extraBody: optionalJsonObject,
+        frequencyPenalty: optionalNumber,
+        json: z.boolean().nullable().optional(),
+        maxLength: optionalNumber,
+        maxTokens: optionalNumber,
+        minLength: optionalNumber,
+        minP: optionalNumber,
+        model: requiredString('Model is required'),
+        n: optionalNumber,
+        presencePenalty: optionalNumber,
         price: z
             .object({
-                cacheRead: z.preprocess(
-                    (value) => (value === '' || value === undefined ? null : value),
-                    z.number().nullable().optional(),
-                ),
-                cacheWrite: z.preprocess(
-                    (value) => (value === '' || value === undefined ? null : value),
-                    z.number().nullable().optional(),
-                ),
-                input: z.preprocess(
-                    (value) => (value === '' || value === undefined ? null : value),
-                    z.number().nullable().optional(),
-                ),
-                output: z.preprocess(
-                    (value) => (value === '' || value === undefined ? null : value),
-                    z.number().nullable().optional(),
-                ),
+                cacheRead: optionalNumber,
+                cacheWrite: optionalNumber,
+                input: optionalNumber,
+                output: optionalNumber,
             })
             .nullable()
             .optional(),
         reasoning: z
             .object({
-                effort: z.preprocess(
-                    (value) => (value === '' || value === undefined ? null : value),
-                    z.string().nullable().optional(),
-                ),
-                maxTokens: z.preprocess(
-                    (value) => (value === '' || value === undefined ? null : value),
-                    z.number().nullable().optional(),
-                ),
+                effort: z.string().nullable().optional(),
+                maxTokens: optionalNumber,
+                mode: z.string().nullable().optional(),
             })
             .nullable()
             .optional(),
-        repetitionPenalty: z.preprocess(
-            (value) => (value === '' || value === undefined ? null : value),
-            z.number().nullable().optional(),
-        ),
-        temperature: z.preprocess(
-            (value) => (value === '' || value === undefined ? null : value),
-            z.number().nullable().optional(),
-        ),
-        topK: z.preprocess(
-            (value) => (value === '' || value === undefined ? null : value),
-            z.number().nullable().optional(),
-        ),
-        topP: z.preprocess(
-            (value) => (value === '' || value === undefined ? null : value),
-            z.number().nullable().optional(),
-        ),
+        repetitionPenalty: optionalNumber,
+        responseMimeType: z.string().nullable().optional(),
+        temperature: optionalNumber,
+        topK: optionalNumber,
+        topP: optionalNumber,
+    })
+    .refine((data) => data.minLength == null || data.maxLength == null || data.minLength <= data.maxLength, {
+        message: 'Min length must not exceed max length',
+        path: ['minLength'],
+    })
+    .refine((data) => data.reasoning?.maxTokens == null || data.reasoning.maxTokens <= 32000, {
+        message: 'Maximum 32000 tokens',
+        path: ['reasoning', 'maxTokens'],
     })
     .optional();
 
-// Define form schema
 const formSchema = z.object({
     agents: z.record(z.string(), agentConfigSchema).optional(),
-    name: z.preprocess(
-        (value) => value || '',
-        z.string().min(1, 'Provider name is required').max(50, 'Maximum 50 characters allowed'),
-    ),
-    type: z.preprocess((value) => value || '', z.string().min(1, 'Provider type is required')),
+    name: requiredString('Provider name is required').pipe(z.string().max(50, 'Maximum 50 characters allowed')),
+    type: requiredString('Provider type is required'),
 });
 
-// Type for agents field in form
-type FormAgents = FormData['agents'];
+type FormAgents = FormInput['agents'];
 
-type FormData = z.infer<typeof formSchema>;
+type FormData = z.output<typeof formSchema>;
 
-// Convert camelCase key to display name (e.g., 'simpleJson' -> 'Simple Json')
+type FormInput = z.input<typeof formSchema>;
+
 const getName = (key: string): string => key.replaceAll(/([A-Z])/g, ' $1').replace(/^./, (item) => item.toUpperCase());
 
-// Helper function to convert string to ReasoningEffort enum
 const getReasoningEffort = (effort: null | string | undefined): null | ReasoningEffort => {
     if (!effort) {
         return null;
@@ -574,8 +681,16 @@ const getReasoningEffort = (effort: null | string | undefined): null | Reasoning
             return ReasoningEffort.Low;
         }
 
+        case 'max': {
+            return ReasoningEffort.Max;
+        }
+
         case 'medium': {
             return ReasoningEffort.Medium;
+        }
+
+        case 'xhigh': {
+            return ReasoningEffort.Xhigh;
         }
 
         default: {
@@ -584,9 +699,187 @@ const getReasoningEffort = (effort: null | string | undefined): null | Reasoning
     }
 };
 
-// Helper function to convert form data to GraphQL input
-const transformFormToGraphQL = (
-    formData: FormData,
+const getReasoningMode = (mode: null | string | undefined): null | ReasoningMode => {
+    switch (mode) {
+        case ReasoningMode.Adaptive: {
+            return ReasoningMode.Adaptive;
+        }
+
+        case ReasoningMode.Budget: {
+            return ReasoningMode.Budget;
+        }
+
+        case ReasoningMode.Off: {
+            return ReasoningMode.Off;
+        }
+
+        default: {
+            return null;
+        }
+    }
+};
+
+const reasoningEffortLabel: Record<ReasoningEffort, string> = {
+    [ReasoningEffort.High]: 'High',
+    [ReasoningEffort.Low]: 'Low',
+    [ReasoningEffort.Max]: 'Max',
+    [ReasoningEffort.Medium]: 'Medium',
+    [ReasoningEffort.Xhigh]: 'Extra High',
+};
+
+const defaultReasoningEfforts: ReasoningEffort[] = [ReasoningEffort.Low, ReasoningEffort.Medium, ReasoningEffort.High];
+
+// Gated by the selected model's declared capability (models.yml), not a model-name
+// allowlist: adaptive-only models lock to adaptive, and effort options follow the model.
+function ReasoningFields({
+    agentKey,
+    control,
+    isLoading,
+    models,
+    setValue,
+}: {
+    agentKey: string;
+    control: Control<FormInput>;
+    isLoading: boolean;
+    models: ModelOption[];
+    setValue: UseFormSetValue<FormInput>;
+}) {
+    const selectedModel = useWatch({ control, name: `agents.${agentKey}.model` });
+    const reasoningMode = useWatch({ control, name: `agents.${agentKey}.reasoning.mode` });
+    const capability = models.find((model) => model.name === selectedModel)?.reasoning ?? null;
+    const isAdaptiveOnly = capability?.mode === ModelReasoningMode.AdaptiveOnly;
+    const supportsAdaptive = isAdaptiveOnly || capability?.mode === ModelReasoningMode.Adaptive;
+    // Off is offered only where the capability confirms a disable actually takes
+    // effect (cannotDisable=false). An absent capability, an always-on model, or a
+    // model where Off would be a silent no-op keeps the Off option hidden.
+    const canDisable = capability != null && capability.cannotDisable !== true;
+    const isOff = reasoningMode === ReasoningMode.Off;
+    const allowedEfforts =
+        capability?.efforts && capability.efforts.length > 0 ? capability.efforts : defaultReasoningEfforts;
+
+    // Reconcile a stale Off when the current model can't disable (e.g. after typing
+    // a custom model name): otherwise mode=off is orphaned with no control to clear
+    // it and silently persists, disabling thinking with no UI affordance. Guarded on
+    // models.length so a still-loading capability list does not wipe a saved Off.
+    useEffect(() => {
+        if (isOff && !canDisable && models.length > 0) {
+            setValue(`agents.${agentKey}.reasoning.mode` as const, null);
+        }
+    }, [isOff, canDisable, models.length, agentKey, setValue]);
+
+    return (
+        <div className="col-span-full p-px">
+            <div className="mt-6 flex flex-col gap-4">
+                <h4 className="text-sm font-medium">Reasoning Configuration</h4>
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                    {(supportsAdaptive || canDisable) && (
+                        <FormField
+                            control={control}
+                            name={`agents.${agentKey}.reasoning.mode`}
+                            render={({ field }) => (
+                                <FormItem>
+                                    <FormLabel>Reasoning Mode</FormLabel>
+                                    <Select
+                                        disabled={isLoading || (isAdaptiveOnly && !canDisable)}
+                                        onValueChange={(value) => field.onChange(value !== 'none' ? value : null)}
+                                        value={field.value ?? (isAdaptiveOnly ? ReasoningMode.Adaptive : 'none')}
+                                    >
+                                        <FormControl>
+                                            <SelectTrigger>
+                                                <SelectValue placeholder="Select reasoning mode" />
+                                            </SelectTrigger>
+                                        </FormControl>
+                                        <SelectContent>
+                                            {!isAdaptiveOnly && <SelectItem value="none">Not selected</SelectItem>}
+                                            {supportsAdaptive && (
+                                                <SelectItem value={ReasoningMode.Adaptive}>Adaptive</SelectItem>
+                                            )}
+                                            {!isAdaptiveOnly && (
+                                                <SelectItem value={ReasoningMode.Budget}>Budget</SelectItem>
+                                            )}
+                                            {canDisable && (
+                                                <SelectItem value={ReasoningMode.Off}>Off (no thinking)</SelectItem>
+                                            )}
+                                        </SelectContent>
+                                    </Select>
+                                    <FormDescription>
+                                        {isAdaptiveOnly
+                                            ? canDisable
+                                                ? 'This model thinks adaptively; choose Off to disable thinking.'
+                                                : 'This model supports only adaptive thinking and cannot be disabled.'
+                                            : 'Adaptive lets the model decide how much to think; budget uses a fixed token budget; off disables thinking.'}
+                                    </FormDescription>
+                                    <FormMessage />
+                                </FormItem>
+                            )}
+                        />
+                    )}
+
+                    <FormField
+                        control={control}
+                        name={`agents.${agentKey}.reasoning.effort`}
+                        render={({ field }) => (
+                            <FormItem>
+                                <FormLabel>Reasoning Effort</FormLabel>
+                                <Select
+                                    disabled={isLoading || isOff}
+                                    onValueChange={(value) => {
+                                        const next = value !== 'none' ? value : null;
+                                        field.onChange(next);
+
+                                        // max/xhigh are adaptive-thinking effort levels; selecting one
+                                        // implies adaptive mode so the backend doesn't drop the reasoning.
+                                        if (
+                                            supportsAdaptive &&
+                                            (next === ReasoningEffort.Xhigh || next === ReasoningEffort.Max)
+                                        ) {
+                                            setValue(
+                                                `agents.${agentKey}.reasoning.mode` as const,
+                                                ReasoningMode.Adaptive,
+                                            );
+                                        }
+                                    }}
+                                    value={field.value ?? 'none'}
+                                >
+                                    <FormControl>
+                                        <SelectTrigger>
+                                            <SelectValue placeholder="Select effort level (optional)" />
+                                        </SelectTrigger>
+                                    </FormControl>
+                                    <SelectContent>
+                                        <SelectItem value="none">Not selected</SelectItem>
+                                        {allowedEfforts.map((effort) => (
+                                            <SelectItem
+                                                key={effort}
+                                                value={effort}
+                                            >
+                                                {reasoningEffortLabel[effort]}
+                                            </SelectItem>
+                                        ))}
+                                    </SelectContent>
+                                </Select>
+                                <FormMessage />
+                            </FormItem>
+                        )}
+                    />
+
+                    <FormInputNumberItem
+                        control={control}
+                        disabled={isLoading || isOff}
+                        label="Reasoning Max Tokens"
+                        min="1"
+                        name={`agents.${agentKey}.reasoning.maxTokens`}
+                        placeholder="1000"
+                        valueType="integer"
+                    />
+                </div>
+            </div>
+        </div>
+    );
+}
+
+export const transformFormToGraphQL = (
+    formData: FormInput,
 ): {
     agents: AgentsConfigInput;
     name: string;
@@ -596,11 +889,17 @@ const transformFormToGraphQL = (
         .filter(([key, data]) => key !== '__typename' && data?.model)
         .reduce((configs, [key, data]) => {
             const config: AgentConfigInput = {
+                extraBody: data?.extraBody?.trim() ? (JSON.parse(data.extraBody) as Record<string, unknown>) : null,
                 frequencyPenalty: data?.frequencyPenalty ?? null,
+                // Not user-editable: carried through so saving a provider does not strip what the
+                // shipped defaults set (json drives WithJSONMode on the simple_json agent).
+                json: data?.json ?? null,
                 maxLength: data?.maxLength ?? null,
                 maxTokens: data?.maxTokens ?? null,
                 minLength: data?.minLength ?? null,
-                model: data!.model, // After filter, data and model are guaranteed to exist
+                minP: data?.minP ?? null,
+                model: data?.model ?? '',
+                n: data?.n ?? null,
                 presencePenalty: data?.presencePenalty ?? null,
                 price:
                     data?.price &&
@@ -619,9 +918,11 @@ const transformFormToGraphQL = (
                     ? {
                           effort: getReasoningEffort(data?.reasoning.effort),
                           maxTokens: data?.reasoning.maxTokens ?? null,
+                          mode: getReasoningMode(data?.reasoning.mode),
                       }
                     : null,
                 repetitionPenalty: data?.repetitionPenalty ?? null,
+                responseMimeType: data?.responseMimeType ?? null,
                 temperature: data?.temperature ?? null,
                 topK: data?.topK ?? null,
                 topP: data?.topP ?? null,
@@ -632,13 +933,12 @@ const transformFormToGraphQL = (
 
     return {
         agents,
-        name: formData.name,
-        type: formData.type as ProviderType,
+        name: formData.name ?? '',
+        type: z.nativeEnum(ProviderType).parse(formData.type),
     };
 };
 
-// Helper function to recursively remove __typename from objects
-const normalizeGraphQLData = (obj: unknown): unknown => {
+export const normalizeGraphQLData = (obj: unknown): unknown => {
     if (obj === null || obj === undefined) {
         return obj;
     }
@@ -651,7 +951,13 @@ const normalizeGraphQLData = (obj: unknown): unknown => {
         return Object.fromEntries(
             Object.entries(obj)
                 .filter(([key]) => key !== '__typename')
-                .map(([key, value]) => [key, normalizeGraphQLData(value)]),
+                .map(([key, value]) => {
+                    if (key === 'extraBody') {
+                        return [key, value && typeof value === 'object' ? JSON.stringify(value, null, 4) : ''];
+                    }
+
+                    return [key, normalizeGraphQLData(value)];
+                }),
         );
     }
 
@@ -661,41 +967,64 @@ const normalizeGraphQLData = (obj: unknown): unknown => {
 interface TestResultsDialogProps {
     handleOpenChange: (isOpen: boolean) => void;
     isOpen: boolean;
-    results: any;
+    results: null | ProviderTestResults;
 }
 
-// Component to render test results dialog
-const TestResultsDialog = ({ handleOpenChange, isOpen, results }: TestResultsDialogProps) => {
+function TestResultsDialog({ handleOpenChange, isOpen, results }: TestResultsDialogProps) {
     if (!results) {
         return null;
     }
 
-    // Transform results object to array, removing __typename
     const agentResults = Object.entries(results)
         .filter(([key]) => key !== '__typename')
-        .map(([agentType, agentData]: [string, any]) => ({
+        .map(([agentType, agentData]) => ({
             agentType,
             tests: agentData?.tests || [],
         }));
 
-    const getStatusIcon = (result: boolean) => {
+    const getStatusIcon = (result: boolean | null | undefined) => {
         if (result === true) {
-            return <CheckCircle className="size-4 text-green-500" />;
-        } else if (result === false) {
-            return <XCircle className="size-4 text-red-500" />;
-        } else {
-            return <Clock className="size-4 text-yellow-500" />;
+            return <CheckCircle className="size-4 shrink-0 text-green-500" />;
         }
+
+        if (result === false) {
+            return <XCircle className="size-4 shrink-0 text-red-500" />;
+        }
+
+        return <Clock className="size-4 shrink-0 text-yellow-500" />;
     };
 
-    const getStatusColor = (result: boolean) => {
+    const getResultBadge = (result: boolean | null | undefined) => {
         if (result === true) {
-            return 'text-green-600';
-        } else if (result === false) {
-            return 'text-red-600';
-        } else {
-            return 'text-yellow-600';
+            return (
+                <Badge
+                    className="shrink-0"
+                    variant="green"
+                >
+                    Success
+                </Badge>
+            );
         }
+
+        if (result === false) {
+            return (
+                <Badge
+                    className="shrink-0"
+                    variant="destructive"
+                >
+                    Failed
+                </Badge>
+            );
+        }
+
+        return (
+            <Badge
+                className="shrink-0"
+                variant="secondary"
+            >
+                Unknown
+            </Badge>
+        );
     };
 
     return (
@@ -703,78 +1032,94 @@ const TestResultsDialog = ({ handleOpenChange, isOpen, results }: TestResultsDia
             onOpenChange={handleOpenChange}
             open={isOpen}
         >
-            <DialogContent className="flex max-h-[80vh] max-w-4xl flex-col">
+            <DialogContent className="flex max-h-[80vh] flex-col sm:max-w-3xl">
                 <DialogHeader className="shrink-0">
                     <DialogTitle>Provider Test Results</DialogTitle>
                 </DialogHeader>
-                <div className="flex flex-1 flex-col gap-6 overflow-y-auto">
+                <div className="flex flex-1 flex-col overflow-y-auto">
                     <Accordion
                         className="w-full"
                         type="multiple"
                     >
                         {agentResults.map(({ agentType, tests }) => {
                             const testsCount = tests.length;
-                            const successTestsCount = tests.filter((test: any) => test.result === true).length;
+                            const successTestsCount = tests.filter((test) => test.result === true).length;
+                            const isAllPassed = testsCount > 0 && successTestsCount === testsCount;
+                            const isNonePassed = testsCount > 0 && successTestsCount === 0;
 
                             return (
                                 <AccordionItem
                                     key={agentType}
                                     value={agentType}
                                 >
-                                    <AccordionTrigger className="text-left">
-                                        <div className="mr-4 flex w-full items-center justify-between">
-                                            <span className="text-lg font-semibold capitalize">{agentType}</span>
-                                            <span className="text-muted-foreground text-sm">
-                                                {successTestsCount}/{testsCount} tests passed
+                                    <AccordionTrigger className="group text-left hover:no-underline">
+                                        <div className="mr-3 flex w-full items-center justify-between gap-3">
+                                            <span className="font-semibold group-hover:underline">
+                                                {getName(agentType)}
                                             </span>
+                                            <Badge
+                                                className="shrink-0"
+                                                variant={
+                                                    isNonePassed ? 'destructive' : isAllPassed ? 'green' : 'secondary'
+                                                }
+                                            >
+                                                {successTestsCount}/{testsCount} passed
+                                            </Badge>
                                         </div>
                                     </AccordionTrigger>
                                     <AccordionContent>
-                                        <div className="flex flex-col gap-3 pt-2">
-                                            {tests.map((test: any, index: number) => (
+                                        <div className="flex flex-col gap-2 pt-1">
+                                            {tests.map((test, index) => (
                                                 <div
                                                     className="rounded-lg border p-3"
                                                     key={index}
                                                 >
-                                                    <div className="mb-2 flex items-start justify-between">
-                                                        <div className="flex items-center gap-2">
-                                                            {getStatusIcon(test.result)}
-                                                            <span className="font-medium">{test.name}</span>
-                                                            {test.type && (
-                                                                <span className="text-muted-foreground text-sm">
-                                                                    ({test.type})
-                                                                </span>
-                                                            )}
+                                                    <div className="flex items-start justify-between gap-2">
+                                                        <div className="flex min-w-0 items-start gap-2">
+                                                            <span className="mt-0.5">{getStatusIcon(test.result)}</span>
+                                                            <div className="min-w-0">
+                                                                <div className="font-medium break-words">
+                                                                    {test.name}
+                                                                </div>
+                                                                {test.type && (
+                                                                    <div className="text-muted-foreground text-xs break-words">
+                                                                        {test.type}
+                                                                    </div>
+                                                                )}
+                                                            </div>
                                                         </div>
-                                                        <div className="text-muted-foreground flex items-center gap-3 text-sm">
+                                                        {getResultBadge(test.result)}
+                                                    </div>
+                                                    {(test.reasoning !== undefined ||
+                                                        test.streaming !== undefined ||
+                                                        Boolean(test.latency)) && (
+                                                        <div className="mt-2 flex flex-wrap gap-1.5">
                                                             {test.reasoning !== undefined && (
-                                                                <span>Reasoning: {test.reasoning ? 'Yes' : 'No'}</span>
+                                                                <Badge variant="outline">
+                                                                    Reasoning: {test.reasoning ? 'Yes' : 'No'}
+                                                                </Badge>
                                                             )}
                                                             {test.streaming !== undefined && (
-                                                                <span>Streaming: {test.streaming ? 'Yes' : 'No'}</span>
+                                                                <Badge variant="outline">
+                                                                    Streaming: {test.streaming ? 'Yes' : 'No'}
+                                                                </Badge>
                                                             )}
-                                                            {test.latency && <span>Latency: {test.latency}ms</span>}
+                                                            {Boolean(test.latency) && (
+                                                                <Badge variant="outline">{test.latency} ms</Badge>
+                                                            )}
                                                         </div>
-                                                    </div>
-                                                    <div
-                                                        className={`text-sm font-medium ${getStatusColor(test.result)}`}
-                                                    >
-                                                        Result:{' '}
-                                                        {test.result === true
-                                                            ? 'Success'
-                                                            : test.result === false
-                                                              ? 'Failed'
-                                                              : 'Unknown'}
-                                                    </div>
+                                                    )}
                                                     {test.error && (
-                                                        <div className="mt-2 rounded border border-red-200 bg-red-50 p-2 text-sm text-red-700">
-                                                            <strong>Error:</strong> {test.error}
+                                                        <div className="border-destructive/30 bg-destructive/5 mt-2 max-h-40 overflow-auto rounded-md border p-2">
+                                                            <pre className="text-destructive font-mono text-xs break-words whitespace-pre-wrap">
+                                                                {test.error}
+                                                            </pre>
                                                         </div>
                                                     )}
                                                 </div>
                                             ))}
                                             {tests.length === 0 && (
-                                                <div className="text-muted-foreground py-4 text-center">
+                                                <div className="text-muted-foreground py-4 text-center text-sm">
                                                     No tests available for this agent
                                                 </div>
                                             )}
@@ -788,9 +1133,8 @@ const TestResultsDialog = ({ handleOpenChange, isOpen, results }: TestResultsDia
             </DialogContent>
         </Dialog>
     );
-};
+}
 
-// Static mapping of agent keys to GraphQL enum types
 const agentTypesMap: Record<string, AgentConfigType> = {
     adviser: AgentConfigType.Adviser,
     assistant: AgentConfigType.Assistant,
@@ -807,7 +1151,6 @@ const agentTypesMap: Record<string, AgentConfigType> = {
     simpleJson: AgentConfigType.SimpleJson,
 };
 
-// Helper function to extract agent types from agents object
 const extractAgentTypes = (agents: unknown): null | string[] => {
     if (!agents || typeof agents !== 'object') {
         return null;
@@ -821,85 +1164,76 @@ const extractAgentTypes = (agents: unknown): null | string[] => {
     return types.length > 0 ? types : null;
 };
 
-const SettingsProvider = () => {
+interface DeleteProviderDialogProps extends Pick<
+    ComponentProps<typeof ConfirmationDialog>,
+    'handleConfirm' | 'handleOpenChange' | 'isOpen'
+> {
+    control: Control<FormInput>;
+}
+
+// Don't hoist this useWatch to the parent — a name keystroke would re-render the whole form.
+function DeleteProviderDialog({ control, handleConfirm, handleOpenChange, isOpen }: DeleteProviderDialogProps) {
+    const providerName = useWatch({ control, name: 'name' });
+
+    return (
+        <ConfirmationDialog
+            cancelText="Cancel"
+            confirmText="Delete"
+            handleConfirm={handleConfirm}
+            handleOpenChange={handleOpenChange}
+            isOpen={isOpen}
+            itemName={providerName}
+            itemType="provider"
+        />
+    );
+}
+
+function SettingsProvider() {
     const { providerId } = useParams<{ providerId: string }>();
     const navigate = useNavigate();
     const [searchParams, setSearchParams] = useSearchParams();
-    const { data, error, loading } = useSettingsProvidersQuery();
-    const [createProvider, { error: createError, loading: isCreateLoading }] = useCreateProviderMutation();
-    const [updateProvider, { error: updateError, loading: isUpdateLoading }] = useUpdateProviderMutation();
-    const [deleteProvider, { error: deleteError, loading: isDeleteLoading }] = useDeleteProviderMutation();
-    const [testProvider, { error: testError, loading: isTestLoading }] = useTestProviderMutation();
-    const [testAgent, { error: agentTestError, loading: isAgentTestLoading }] = useTestAgentMutation();
+    const { data, error, loading, refetch } = useQuery(SettingsProvidersDocument);
+    const [createProvider, { loading: isCreateLoading }] = useMutation(CreateProviderDocument);
+    const [updateProvider, { loading: isUpdateLoading }] = useMutation(UpdateProviderDocument);
+    const [deleteProvider, { loading: isDeleteLoading }] = useMutation(DeleteProviderDocument);
+    const [testProvider, { loading: isTestLoading }] = useMutation(TestProviderDocument);
+    const [testAgent, { loading: isAgentTestLoading }] = useMutation(TestAgentDocument);
     const [currentAgentKey, setCurrentAgentKey] = useState<null | string>(null);
     const [submitError, setSubmitError] = useState<null | string>(null);
     const [isTestDialogOpen, setIsTestDialogOpen] = useState(false);
-    const [testResults, setTestResults] = useState<any>(null);
+    const [testResults, setTestResults] = useState<null | ProviderTestResults>(null);
     const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
-    const [isLeaveDialogOpen, setIsLeaveDialogOpen] = useState(false);
-    const [pendingBrowserBack, setPendingBrowserBack] = useState(false);
-    const allowBrowserLeaveRef = useRef(false);
-    const hasPushedBlockerStateRef = useRef(false);
 
     const isNew = providerId === 'new';
     const isLoading = isCreateLoading || isUpdateLoading || isDeleteLoading;
+    const { isDesktop } = useBreakpoint();
 
-    const form = useForm<FormData>({
+    const form = useAppForm<FormInput, unknown, FormData>({
         defaultValues: {
             agents: {},
             name: undefined,
             type: undefined,
         },
-        resolver: zodResolver(formSchema),
+        // The seeding effect re-runs on every settingsProviders refetch (cache-and-network +
+        // replaceWithIncoming gives a fresh `data`); without this a background refetch landing
+        // mid-edit silently wipes the unsaved form.
+        resetOptions: { keepDirtyValues: true },
+        schema: formSchema,
     });
 
     const { control, formState, handleSubmit: handleFormSubmit, reset, setValue, trigger, watch } = form;
 
     const { isDirty } = useFormState({ control });
+    const seededTypeRef = useRef<null | string>(null);
 
-    // Maintain a blocker state at the top of history when form is dirty
     useEffect(() => {
-        if (isDirty && !hasPushedBlockerStateRef.current) {
-            window.history.pushState({ __pentagiBlock__: true }, '');
-            hasPushedBlockerStateRef.current = true;
+        if (submitError) {
+            toast.error(submitError);
         }
-    }, [isDirty]);
+    }, [submitError]);
 
-    // Intercept browser back using popstate when form is dirty
-    useEffect(() => {
-        const handlePopState = () => {
-            if (!isDirty) {
-                return;
-            }
-
-            if (allowBrowserLeaveRef.current) {
-                // Allow single leave without blocking
-                allowBrowserLeaveRef.current = false;
-
-                return;
-            }
-
-            // User navigated back off the blocker entry to the previous one; go forward to stay
-            setPendingBrowserBack(true);
-            setIsLeaveDialogOpen(true);
-            // Return to the blocker entry
-            window.history.forward();
-        };
-
-        window.addEventListener('popstate', handlePopState, { capture: true });
-
-        return () => {
-            window.removeEventListener('popstate', handlePopState, { capture: true });
-        };
-    }, [isDirty]);
-
-    // Watch selected type
     const selectedType = useWatch({ control, name: 'type' });
 
-    // Watch provider name for delete confirmation dialog
-    const providerName = useWatch({ control, name: 'name' });
-
-    // Read query parameters for form initialization (stable)
     const formQueryParams = useMemo(
         () => ({
             id: searchParams.get('id'),
@@ -908,37 +1242,29 @@ const SettingsProvider = () => {
         [searchParams],
     );
 
-    // Get dynamic agent types from data
     const getAgentTypes = () => {
-        // Try to get agents from specific sources in priority order
         const agentsSource =
-            // For new providers, use default provider for selected type
             (isNew &&
                 selectedType &&
                 data?.settingsProviders?.default?.[selectedType as keyof typeof data.settingsProviders.default]
                     ?.agents) ||
-            // For existing providers, use current provider's agents
             (!isNew &&
                 providerId &&
                 data?.settingsProviders?.userDefined?.find((p: Provider) => p.id == providerId)?.agents) ||
-            // Fallback to any available default provider
             (data?.settingsProviders?.default &&
                 Object.values(data.settingsProviders.default).find((provider) => provider?.agents)?.agents) ||
             null;
 
-        // Extract and return agent types, or fallback to hardcoded list
         return extractAgentTypes(agentsSource) ?? Object.keys(agentTypesMap);
     };
 
     const agentTypes = getAgentTypes();
 
-    // Get available models filtered by selected provider type
     const availableModels = useMemo(() => {
         if (!data?.settingsProviders?.models || !selectedType) {
             return [];
         }
 
-        // Filter models by selected provider type
         const { models } = data.settingsProviders;
         const providerModels = models[selectedType as keyof typeof models];
 
@@ -947,7 +1273,7 @@ const SettingsProvider = () => {
         }
 
         return providerModels
-            .map((model: any) => ({
+            .map((model) => ({
                 name: model.name,
                 price: model.price
                     ? {
@@ -957,15 +1283,26 @@ const SettingsProvider = () => {
                           output: model.price.output ?? 0,
                       }
                     : null,
+                reasoning: model.reasoning ?? null,
                 thinking: model.thinking,
             }))
-            .filter((model) => model.name) // Remove any models without names
+            .filter((model) => model.name)
             .sort((a, b) => a.name.localeCompare(b.name));
     }, [data, selectedType]);
 
-    // Fill agents when provider type is selected (only for new providers)
     useEffect(() => {
         if (!isNew || !selectedType || !data?.settingsProviders?.default || availableModels.length === 0) {
+            return;
+        }
+
+        // setValue is outside the form's keepDirtyValues, so a background refetch re-runs this effect
+        // with a fresh `data` identity and overwrites agent edits the user has not saved. Re-seed only
+        // when the type actually changed — that is the case where the previous type's agents are wrong.
+        const isSameType = seededTypeRef.current === selectedType;
+
+        seededTypeRef.current = selectedType;
+
+        if (isSameType && form.getFieldState('agents').isDirty) {
             return;
         }
 
@@ -977,14 +1314,9 @@ const SettingsProvider = () => {
                 Object.entries(defaultProvider.agents)
                     .filter(([key]) => key !== '__typename')
                     .map(([key, data]) => {
-                        // const agent = Object.fromEntries(
-                        //     Object.entries(data).filter(([key]) => key !== '__typename'),
-                        // ) as AgentConfigInput;
                         const agent = { ...data };
 
-                        // Check if the model from defaultProvider exists in availableModels
                         if (agent.model && !availableModels.find((m) => m.name === agent.model)) {
-                            // Use first available model if default model not found
                             agent.model = availableModels[0]?.name || agent.model;
                         }
 
@@ -997,10 +1329,8 @@ const SettingsProvider = () => {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [availableModels, data, isNew, selectedType]);
 
-    // Update query parameter when type changes (only for new providers)
     useEffect(() => {
         if (!isNew) {
-            // Clear query parameters for existing providers
             if (searchParams.size > 0) {
                 setSearchParams({});
             }
@@ -1008,21 +1338,18 @@ const SettingsProvider = () => {
             return;
         }
 
-        // Don't update query params if we're copying from existing provider
         const queryId = searchParams.get('id');
 
         if (queryId) {
             return;
         }
 
-        // Don't update query params on initial load if we're reading from query params
         const queryType = searchParams.get('type');
 
         if (!selectedType && queryType) {
             return;
         }
 
-        // Update query parameter based on selected type
         setSearchParams((prev) => {
             const params = new URLSearchParams(prev);
 
@@ -1034,9 +1361,8 @@ const SettingsProvider = () => {
 
             return params;
         });
-    }, [selectedType, setSearchParams, isNew, searchParams]); // Include searchParams since we read from it
+    }, [selectedType, setSearchParams, isNew, searchParams]);
 
-    // Fill form with data when available
     useEffect(() => {
         if (!data?.settingsProviders) {
             return;
@@ -1045,16 +1371,33 @@ const SettingsProvider = () => {
         const providers = data.settingsProviders;
 
         if (isNew || !providerId) {
-            // For new provider, start with empty form but check for type query parameter
             const queryType = formQueryParams.type ?? undefined;
             const queryId = formQueryParams.id;
 
-            // If we have an id in query params, copy from existing provider
+            // A hand-typed ?type= URL bypasses the create menu's enabled-only filter; an
+            // unknown or disabled type would otherwise create a dead provider or dump a raw
+            // zod error on submit. Bounce it to the list. (Clone-by-id is gated separately below.)
+            if (!queryId && queryType && !providers.enabled[queryType as keyof typeof providers.enabled]) {
+                toast.error(`Provider type "${queryType}" is not available`);
+                navigate(routes.settings.providers, { replace: true });
+
+                return;
+            }
+
             if (queryId && data?.settingsProviders?.userDefined) {
                 const sourceProvider = data.settingsProviders.userDefined.find((p: Provider) => p.id == queryId);
 
                 if (sourceProvider) {
                     const { agents, name, type: sourceType } = sourceProvider;
+
+                    // Cloning a provider whose type is now disabled would only make
+                    // another dead one — gate it the same as the ?type= path.
+                    if (sourceType && !providers.enabled[sourceType as keyof typeof providers.enabled]) {
+                        toast.error(`Provider type "${sourceType}" is not available`);
+                        navigate(routes.settings.providers, { replace: true });
+
+                        return;
+                    }
 
                     reset({
                         agents: agents ? (normalizeGraphQLData(agents) as FormAgents) : {},
@@ -1075,8 +1418,8 @@ const SettingsProvider = () => {
                 });
             }
 
-            // Default new provider form - but only if selectedType is not set
-            // to avoid conflicts with agent filling useEffect
+            // Bail out of the empty-form reset when `selectedType` is set — the agent-filling
+            // effect above is the source of truth in that case and would fight us.
             if (!selectedType) {
                 reset({
                     agents: {},
@@ -1091,7 +1434,7 @@ const SettingsProvider = () => {
         const provider = providers.userDefined?.find((provider: Provider) => provider.id == providerId);
 
         if (!provider) {
-            navigate('/settings/providers');
+            navigate(routes.settings.providers);
 
             return;
         }
@@ -1106,9 +1449,8 @@ const SettingsProvider = () => {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [data, formQueryParams, isNew, providerId, selectedType]);
 
-    const handleSubmit = async () => {
-        // Get all form data including disabled fields
-        // Note: getValues() excludes disabled fields, watch() includes them
+    const performSave = async (): Promise<boolean> => {
+        // watch() — not getValues() — because disabled fields must be included in the payload.
         const formData = watch();
 
         try {
@@ -1117,13 +1459,11 @@ const SettingsProvider = () => {
             const mutationData = transformFormToGraphQL(formData);
 
             if (isNew) {
-                // Create new provider
                 await createProvider({
                     refetchQueries: ['settingsProviders'],
                     variables: mutationData,
                 });
             } else {
-                // Update existing provider
                 await updateProvider({
                     refetchQueries: ['settingsProviders'],
                     variables: {
@@ -1133,12 +1473,79 @@ const SettingsProvider = () => {
                 });
             }
 
-            // Navigate back to providers list on success
-            navigate('/settings/providers');
+            return true;
         } catch (error) {
             console.error('Submit error:', error);
             setSubmitError(error instanceof Error ? error.message : 'An error occurred while saving');
+
+            return false;
         }
+    };
+
+    const onSaveAndLeave = async (): Promise<boolean> => {
+        setSubmitError(null);
+        const valid = await trigger();
+
+        if (!valid) {
+            setSubmitError(
+                `Please fix the following validation errors:\n\n${formatFormErrors(formState.errors as Record<string, unknown>)}`,
+            );
+
+            return false;
+        }
+
+        return performSave();
+    };
+
+    // Validity is only needed to gate the unsaved-changes dialog; subscribing to formState.isValid
+    // would make RHF re-run the whole zod schema on every keystroke. Validate lazily when the dialog opens.
+    const [isFormValid, setIsFormValid] = useState(true);
+
+    const unsavedGuard = useUnsavedChangesGuard({
+        isDirty,
+        isFormValid,
+        onSave: onSaveAndLeave,
+    });
+
+    useEffect(() => {
+        if (!unsavedGuard.isOpen) {
+            return;
+        }
+
+        let cancelled = false;
+
+        void (async () => {
+            const valid = await trigger();
+
+            if (!cancelled) {
+                setIsFormValid(valid);
+            }
+        })();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [unsavedGuard.isOpen, trigger]);
+
+    const handleSubmit = async () => {
+        const saved = await performSave();
+
+        if (saved) {
+            unsavedGuard.skipNextBlock();
+            navigate(routes.settings.providers);
+        }
+    };
+
+    const handleInvalidSubmit = (errors: FieldErrors<FormInput>) => {
+        setSubmitError(
+            `Please fix the following validation errors:\n\n${formatFormErrors(errors as Record<string, unknown>)}`,
+        );
+    };
+
+    const handleFormEvent = async (event: FormEvent<HTMLFormElement>) => {
+        setSubmitError(null);
+
+        await handleFormSubmit(handleSubmit, handleInvalidSubmit)(event);
     };
 
     const handleDelete = () => {
@@ -1162,73 +1569,21 @@ const SettingsProvider = () => {
                 variables: { providerId },
             });
 
-            // Navigate back to providers list on success
-            navigate('/settings/providers');
+            navigate(routes.settings.providers);
         } catch (error) {
             console.error('Delete error:', error);
             setSubmitError(error instanceof Error ? error.message : 'An error occurred while deleting');
         }
     };
 
-    // Test entire provider (all agents)
     const handleTest = async () => {
-        // Trigger form validation
+        setSubmitError(null);
         const isValid = await trigger();
 
         if (!isValid) {
-            const { errors } = formState;
-
-            // Helper function to format field names for display
-            const formatFieldName = (fieldPath: string): string => {
-                return fieldPath
-                    .split('.')
-                    .map((part) => {
-                        // Capitalize first letter and add spaces before uppercase letters
-                        return part.charAt(0).toUpperCase() + part.slice(1).replaceAll(/([A-Z])/g, ' $1');
-                    })
-                    .join(' → ');
-            };
-
-            // Show validation errors to user
-            const errorMessages = Object.entries(errors)
-                .map(([field, error]: [string, any]) => {
-                    if (error?.message) {
-                        return `• ${formatFieldName(field)}: ${error.message}`;
-                    }
-
-                    if (error && typeof error === 'object') {
-                        // Handle nested errors (like agents.simple.model)
-                        return Object.entries(error)
-                            .map(([subField, subError]: [string, any]) => {
-                                if (subError?.message) {
-                                    return `• ${formatFieldName(`${field}.${subField}`)}: ${subError.message}`;
-                                }
-
-                                if (subError && typeof subError === 'object') {
-                                    return Object.entries(subError)
-                                        .map(([nestedField, nestedError]: [string, any]) => {
-                                            if (nestedError?.message) {
-                                                return `• ${formatFieldName(`${field}.${subField}.${nestedField}`)}: ${nestedError.message}`;
-                                            }
-
-                                            return null;
-                                        })
-                                        .filter(Boolean)
-                                        .join('\n');
-                                }
-
-                                return null;
-                            })
-                            .filter(Boolean)
-                            .join('\n');
-                    }
-
-                    return null;
-                })
-                .filter(Boolean)
-                .join('\n');
-
-            setSubmitError(`Please fix the following validation errors:\n\n${errorMessages}`);
+            setSubmitError(
+                `Please fix the following validation errors:\n\n${formatFormErrors(formState.errors as Record<string, unknown>)}`,
+            );
 
             return;
         }
@@ -1236,7 +1591,6 @@ const SettingsProvider = () => {
         try {
             setSubmitError(null);
 
-            // Get form data and transform it - including disabled fields
             const formData = watch();
             const { agents, type } = transformFormToGraphQL(formData);
             const result = await testProvider({
@@ -1246,7 +1600,7 @@ const SettingsProvider = () => {
                 },
             });
 
-            setTestResults(result.data?.testProvider);
+            setTestResults((result.data?.testProvider ?? null) as null | ProviderTestResults);
             setIsTestDialogOpen(true);
         } catch (error) {
             console.error('Test error:', error);
@@ -1254,57 +1608,14 @@ const SettingsProvider = () => {
         }
     };
 
-    // Test a single agent (uses testAgent where supported, otherwise falls back to filtered provider test)
     const handleTestAgent = async (agentKey: string) => {
-        // Validate only fields for this agent and general required fields
+        setSubmitError(null);
         const isValid = await trigger();
 
         if (!isValid) {
-            const { errors } = formState;
-            const formatFieldName = (fieldPath: string): string =>
-                fieldPath
-                    .split('.')
-                    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).replaceAll(/([A-Z])/g, ' $1'))
-                    .join(' → ');
-
-            const errorMessages = Object.entries(errors)
-                .map(([field, error]: [string, any]) => {
-                    if (error?.message) {
-                        return `• ${formatFieldName(field)}: ${error.message}`;
-                    }
-
-                    if (error && typeof error === 'object') {
-                        return Object.entries(error)
-                            .map(([subField, subError]: [string, any]) => {
-                                if (subError?.message) {
-                                    return `• ${formatFieldName(`${field}.${subField}`)}: ${subError.message}`;
-                                }
-
-                                if (subError && typeof subError === 'object') {
-                                    return Object.entries(subError)
-                                        .map(([nestedField, nestedError]: [string, any]) => {
-                                            if (nestedError?.message) {
-                                                return `• ${formatFieldName(`${field}.${subField}.${nestedField}`)}: ${nestedError.message}`;
-                                            }
-
-                                            return null;
-                                        })
-                                        .filter(Boolean)
-                                        .join('\n');
-                                }
-
-                                return null;
-                            })
-                            .filter(Boolean)
-                            .join('\n');
-                    }
-
-                    return null;
-                })
-                .filter(Boolean)
-                .join('\n');
-
-            setSubmitError(`Please fix the following validation errors:\n\n${errorMessages}`);
+            setSubmitError(
+                `Please fix the following validation errors:\n\n${formatFormErrors(formState.errors as Record<string, unknown>)}`,
+            );
 
             return;
         }
@@ -1312,7 +1623,7 @@ const SettingsProvider = () => {
         try {
             setSubmitError(null);
             setCurrentAgentKey(agentKey);
-            // Note: getValues() excludes disabled fields, watch() includes them
+            // watch() — not getValues() — because disabled fields must be included in the payload.
             const formData = watch();
             const { agents, type } = transformFormToGraphQL(formData);
 
@@ -1321,7 +1632,7 @@ const SettingsProvider = () => {
             const singleResult = await testAgent({
                 variables: { agent, agentType: agentTypesMap[agentKey] ?? AgentConfigType.Simple, type },
             });
-            setTestResults({ [agentKey]: singleResult.data?.testAgent });
+            setTestResults({ [agentKey]: singleResult.data?.testAgent } as ProviderTestResults);
             setIsTestDialogOpen(true);
             setCurrentAgentKey(null);
 
@@ -1333,54 +1644,44 @@ const SettingsProvider = () => {
         }
     };
 
-    const handleBack = () => {
-        if (isDirty) {
-            setIsLeaveDialogOpen(true);
-
-            return;
-        }
-
-        navigate('/settings/providers');
-    };
-
-    const handleConfirmLeave = () => {
-        if (pendingBrowserBack) {
-            allowBrowserLeaveRef.current = true;
-            setPendingBrowserBack(false);
-            // Skip the blocker entry and go to the real previous page
-            window.history.go(-2);
-
-            return;
-        }
-
-        navigate('/settings/providers');
-    };
-
-    const handleLeaveDialogOpenChange = (open: boolean) => {
-        if (!open && pendingBrowserBack) {
-            setPendingBrowserBack(false);
-        }
-
-        setIsLeaveDialogOpen(open);
-    };
-
-    if (loading) {
+    if (loading && !data) {
         return (
-            <StatusCard
-                description="Please wait while we fetch provider configuration"
-                icon={<Loader2 className="text-muted-foreground size-16 animate-spin" />}
-                title="Loading provider data..."
-            />
+            <>
+                <AppHeader>
+                    <AppHeaderContent>
+                        <AppHeaderTitle icon={<Plug className="size-4 shrink-0" />}>
+                            {isNew ? 'Create Provider' : 'Edit Provider'}
+                        </AppHeaderTitle>
+                    </AppHeaderContent>
+                </AppHeader>
+                <div className="flex flex-1 items-center justify-center p-4">
+                    <LoadingState
+                        description="Please wait while we fetch provider configuration"
+                        title="Loading provider data..."
+                    />
+                </div>
+            </>
         );
     }
 
-    if (error) {
+    if (error && !data) {
         return (
-            <Alert variant="destructive">
-                <AlertCircle className="size-4" />
-                <AlertTitle>Error loading provider data</AlertTitle>
-                <AlertDescription>{error.message}</AlertDescription>
-            </Alert>
+            <>
+                <AppHeader>
+                    <AppHeaderContent>
+                        <AppHeaderTitle icon={<Plug className="size-4 shrink-0" />}>
+                            {isNew ? 'Create Provider' : 'Edit Provider'}
+                        </AppHeaderTitle>
+                    </AppHeaderContent>
+                </AppHeader>
+                <div className="flex flex-1 items-center justify-center p-4">
+                    <ErrorState
+                        message={error.message}
+                        onRetry={refetch}
+                        title="Error loading provider data"
+                    />
+                </div>
+            </>
         );
     }
 
@@ -1388,428 +1689,374 @@ const SettingsProvider = () => {
         ? Object.keys(data?.settingsProviders.models).filter((key) => key !== '__typename')
         : [];
 
-    const mutationError = createError || updateError || deleteError || testError || agentTestError || submitError;
-
-    return (
-        <>
-            <div className="flex flex-col gap-4">
-                <div className="flex flex-col gap-2">
-                    <h2 className="flex items-center gap-2 text-lg font-semibold">
-                        <Cpu className="text-muted-foreground size-5" />
-                        {isNew ? 'New Provider' : 'Provider Settings'}
-                    </h2>
-
-                    <div className="text-muted-foreground">
-                        {isNew
-                            ? 'Configure a new language model provider'
-                            : 'Update provider settings and configuration'}
-                    </div>
-                </div>
-
-                <Form {...form}>
-                    <form
-                        className="flex flex-col gap-6"
-                        id="provider-form"
-                        onSubmit={handleFormSubmit(handleSubmit)}
-                    >
-                        {/* Error Alert */}
-                        {mutationError && (
-                            <Alert variant="destructive">
-                                <AlertCircle className="size-4" />
-                                <AlertTitle>Error</AlertTitle>
-                                <AlertDescription>
-                                    {mutationError instanceof Error ? (
-                                        mutationError.message
-                                    ) : (
-                                        <div className="whitespace-pre-line">{mutationError}</div>
-                                    )}
-                                </AlertDescription>
-                            </Alert>
-                        )}
-
-                        {/* Form fields */}
-                        <FormComboboxItem
-                            allowCustom={false}
-                            control={control}
-                            description="The type of language model provider"
-                            disabled={isLoading || !!selectedType}
-                            label="Type"
-                            name="type"
-                            options={providers}
-                            placeholder="Select provider"
-                        />
-
-                        <FormInputStringItem
-                            control={control}
-                            description="A unique name for your provider configuration"
-                            disabled={isLoading}
-                            label="Name"
-                            name="name"
-                            placeholder="Enter provider name"
-                        />
-
-                        {/* Agents Configuration Section */}
-                        <div className="flex flex-col gap-4">
-                            <div>
-                                <h3 className="text-lg font-medium">Agent Configurations</h3>
-                                <p className="text-muted-foreground text-sm">Configure settings for each agent type</p>
-                            </div>
-
-                            <Accordion
-                                className="w-full"
-                                type="multiple"
-                            >
-                                {agentTypes.map((agentKey) => (
-                                    <AccordionItem
-                                        key={agentKey}
-                                        value={agentKey}
-                                    >
-                                        <AccordionTrigger className="group text-left hover:no-underline">
-                                            <div className="flex w-full items-center justify-between gap-2">
-                                                <span className="group-hover:underline">{getName(agentKey)}</span>
-                                                <span
-                                                    className={cn(
-                                                        'hover:bg-accent hover:text-accent-foreground mr-2 flex items-center gap-1 rounded border px-2 py-1 text-xs',
-                                                        (isTestLoading || isAgentTestLoading) &&
-                                                            'pointer-events-none cursor-not-allowed opacity-50',
-                                                    )}
-                                                    onClick={(event) => {
-                                                        if (isTestLoading || isAgentTestLoading) {
-                                                            return;
-                                                        }
-
-                                                        event.stopPropagation();
-                                                        handleTestAgent(agentKey);
-                                                    }}
-                                                >
-                                                    {isAgentTestLoading && currentAgentKey === agentKey ? (
-                                                        <Loader2 className="size-4 animate-spin" />
-                                                    ) : (
-                                                        <Play className="size-4" />
-                                                    )}
-                                                    <span className="no-underline! hover:no-underline!">
-                                                        {isAgentTestLoading && currentAgentKey === agentKey
-                                                            ? 'Testing...'
-                                                            : 'Test'}
-                                                    </span>
-                                                </span>
-                                            </div>
-                                        </AccordionTrigger>
-                                        <AccordionContent className="flex flex-col gap-4 pt-4">
-                                            <div className="grid grid-cols-1 gap-4 p-px md:grid-cols-2">
-                                                {/* Model field */}
-                                                <FormModelComboboxItem
-                                                    control={control}
-                                                    disabled={isLoading}
-                                                    label="Model"
-                                                    name={`agents.${agentKey}.model`}
-                                                    onOptionSelect={(option) => {
-                                                        {
-                                                            /* Update price fields */
-                                                        }
-
-                                                        const price = option?.price;
-
-                                                        setValue(
-                                                            `agents.${agentKey}.price.input` as const,
-                                                            price?.input ?? null,
-                                                        );
-                                                        setValue(
-                                                            `agents.${agentKey}.price.output` as const,
-                                                            price?.output ?? null,
-                                                        );
-                                                        setValue(
-                                                            `agents.${agentKey}.price.cacheRead` as const,
-                                                            price?.cacheRead ?? null,
-                                                        );
-                                                        setValue(
-                                                            `agents.${agentKey}.price.cacheWrite` as const,
-                                                            price?.cacheWrite ?? null,
-                                                        );
-                                                    }}
-                                                    options={availableModels}
-                                                    placeholder="Select or enter model name"
-                                                />
-
-                                                {/* Temperature field */}
-                                                <FormInputNumberItem
-                                                    control={control}
-                                                    disabled={isLoading}
-                                                    label="Temperature"
-                                                    max="2"
-                                                    min="0"
-                                                    name={`agents.${agentKey}.temperature`}
-                                                    placeholder="0.7"
-                                                    step="0.1"
-                                                />
-
-                                                {/* Max Tokens field */}
-                                                <FormInputNumberItem
-                                                    control={control}
-                                                    disabled={isLoading}
-                                                    label="Max Tokens"
-                                                    min="1"
-                                                    name={`agents.${agentKey}.maxTokens`}
-                                                    placeholder="1000"
-                                                    valueType="integer"
-                                                />
-
-                                                {/* Top P field */}
-                                                <FormInputNumberItem
-                                                    control={control}
-                                                    disabled={isLoading}
-                                                    label="Top P"
-                                                    max="1"
-                                                    min="0"
-                                                    name={`agents.${agentKey}.topP`}
-                                                    placeholder="0.9"
-                                                    step="0.01"
-                                                />
-
-                                                {/* Top K field */}
-                                                <FormInputNumberItem
-                                                    control={control}
-                                                    disabled={isLoading}
-                                                    label="Top K"
-                                                    min="1"
-                                                    name={`agents.${agentKey}.topK`}
-                                                    placeholder="40"
-                                                    valueType="integer"
-                                                />
-
-                                                {/* Min Length field */}
-                                                <FormInputNumberItem
-                                                    control={control}
-                                                    disabled={isLoading}
-                                                    label="Min Length"
-                                                    min="0"
-                                                    name={`agents.${agentKey}.minLength`}
-                                                    placeholder="0"
-                                                    valueType="integer"
-                                                />
-
-                                                {/* Max Length field */}
-                                                <FormInputNumberItem
-                                                    control={control}
-                                                    disabled={isLoading}
-                                                    label="Max Length"
-                                                    min="1"
-                                                    name={`agents.${agentKey}.maxLength`}
-                                                    placeholder="2000"
-                                                    valueType="integer"
-                                                />
-
-                                                {/* Repetition Penalty field */}
-                                                <FormInputNumberItem
-                                                    control={control}
-                                                    disabled={isLoading}
-                                                    label="Repetition Penalty"
-                                                    max="2"
-                                                    min="0"
-                                                    name={`agents.${agentKey}.repetitionPenalty`}
-                                                    placeholder="1.0"
-                                                    step="0.01"
-                                                />
-
-                                                {/* Frequency Penalty field */}
-                                                <FormInputNumberItem
-                                                    control={control}
-                                                    disabled={isLoading}
-                                                    label="Frequency Penalty"
-                                                    max="2"
-                                                    min="0"
-                                                    name={`agents.${agentKey}.frequencyPenalty`}
-                                                    placeholder="0.0"
-                                                    step="0.01"
-                                                />
-
-                                                {/* Presence Penalty field */}
-                                                <FormInputNumberItem
-                                                    control={control}
-                                                    disabled={isLoading}
-                                                    label="Presence Penalty"
-                                                    max="2"
-                                                    min="0"
-                                                    name={`agents.${agentKey}.presencePenalty`}
-                                                    placeholder="0.0"
-                                                    step="0.01"
-                                                />
-                                            </div>
-
-                                            {/* Reasoning Configuration */}
-                                            <div className="col-span-full p-px">
-                                                <div className="mt-6 flex flex-col gap-4">
-                                                    <h4 className="text-sm font-medium">Reasoning Configuration</h4>
-                                                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                                                        {/* Reasoning Effort field */}
-                                                        <FormField
-                                                            control={control}
-                                                            name={`agents.${agentKey}.reasoning.effort`}
-                                                            render={({ field }) => (
-                                                                <FormItem>
-                                                                    <FormLabel>Reasoning Effort</FormLabel>
-                                                                    <Select
-                                                                        defaultValue={field.value ?? 'none'}
-                                                                        disabled={isLoading}
-                                                                        onValueChange={(value) =>
-                                                                            field.onChange(
-                                                                                value !== 'none' ? value : null,
-                                                                            )
-                                                                        }
-                                                                    >
-                                                                        <FormControl>
-                                                                            <SelectTrigger>
-                                                                                <SelectValue placeholder="Select effort level (optional)" />
-                                                                            </SelectTrigger>
-                                                                        </FormControl>
-                                                                        <SelectContent>
-                                                                            <SelectItem value="none">
-                                                                                Not selected
-                                                                            </SelectItem>
-                                                                            <SelectItem value={ReasoningEffort.Low}>
-                                                                                Low
-                                                                            </SelectItem>
-                                                                            <SelectItem value={ReasoningEffort.Medium}>
-                                                                                Medium
-                                                                            </SelectItem>
-                                                                            <SelectItem value={ReasoningEffort.High}>
-                                                                                High
-                                                                            </SelectItem>
-                                                                        </SelectContent>
-                                                                    </Select>
-                                                                    <FormMessage />
-                                                                </FormItem>
-                                                            )}
-                                                        />
-
-                                                        {/* Reasoning Max Tokens field */}
-                                                        <FormInputNumberItem
-                                                            control={control}
-                                                            disabled={isLoading}
-                                                            label="Reasoning Max Tokens"
-                                                            min="1"
-                                                            name={`agents.${agentKey}.reasoning.maxTokens`}
-                                                            placeholder="1000"
-                                                            valueType="integer"
-                                                        />
-                                                    </div>
-                                                </div>
-                                            </div>
-
-                                            {/* Price Configuration */}
-                                            <div className="col-span-full p-px">
-                                                <div className="mt-6 flex flex-col gap-4">
-                                                    <h4 className="text-sm font-medium">Price Configuration</h4>
-                                                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                                                        {/* Price Input field */}
-                                                        <FormInputNumberItem
-                                                            control={control}
-                                                            description="Price per 1M input tokens"
-                                                            disabled={isLoading}
-                                                            label="Input Price"
-                                                            min="0"
-                                                            name={`agents.${agentKey}.price.input`}
-                                                            placeholder="0.001"
-                                                            step="0.000001"
-                                                        />
-
-                                                        {/* Price Output field */}
-                                                        <FormInputNumberItem
-                                                            control={control}
-                                                            description="Price per 1M output tokens"
-                                                            disabled={isLoading}
-                                                            label="Output Price"
-                                                            min="0"
-                                                            name={`agents.${agentKey}.price.output`}
-                                                            placeholder="0.002"
-                                                            step="0.000001"
-                                                        />
-
-                                                        {/* Cache Read Price field */}
-                                                        <FormInputNumberItem
-                                                            control={control}
-                                                            description="Price per 1M cached read tokens"
-                                                            disabled={isLoading}
-                                                            label="Cache Read Price"
-                                                            min="0"
-                                                            name={`agents.${agentKey}.price.cacheRead`}
-                                                            placeholder="0.0001"
-                                                            step="0.000001"
-                                                        />
-
-                                                        {/* Cache Write Price field */}
-                                                        <FormInputNumberItem
-                                                            control={control}
-                                                            description="Price per 1M cache write tokens"
-                                                            disabled={isLoading}
-                                                            label="Cache Write Price"
-                                                            min="0"
-                                                            name={`agents.${agentKey}.price.cacheWrite`}
-                                                            placeholder="0.00015"
-                                                            step="0.000001"
-                                                        />
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        </AccordionContent>
-                                    </AccordionItem>
-                                ))}
-                            </Accordion>
-                        </div>
-                    </form>
-                </Form>
+    const metaFields = (
+        <div className="flex flex-col gap-6">
+            <div className="flex flex-col gap-2 text-center">
+                <h2 className="text-2xl font-semibold">{isNew ? 'Create a new provider' : 'Edit provider'}</h2>
+                <p className="text-muted-foreground">
+                    {isNew ? 'Configure a new language model provider' : 'Update provider settings and configuration'}
+                </p>
             </div>
 
-            {/* Sticky buttons at bottom */}
-            <div className="bg-background sticky -bottom-4 -mx-4 mt-4 -mb-4 flex items-center border-t p-4 shadow-lg">
-                <div className="flex gap-2">
-                    {/* Delete button - only show when editing existing provider */}
-                    {!isNew && (
-                        <Button
-                            disabled={isLoading}
-                            onClick={handleDelete}
-                            type="button"
-                            variant="destructive"
-                        >
-                            {isDeleteLoading ? (
-                                <Loader2 className="size-4 animate-spin" />
-                            ) : (
-                                <Trash2 className="size-4" />
-                            )}
-                            {isDeleteLoading ? 'Deleting...' : 'Delete'}
-                        </Button>
-                    )}
-                    <Button
+            <FormComboboxItem
+                allowCustom={false}
+                control={control}
+                description="The type of language model provider"
+                disabled={isLoading || !!selectedType}
+                label="Type"
+                name="type"
+                options={providers}
+                placeholder="Select provider"
+            />
+
+            <FormInputStringItem
+                control={control}
+                description="A unique name for your provider configuration"
+                disabled={isLoading}
+                label="Name"
+                name="name"
+                placeholder="Enter provider name"
+            />
+        </div>
+    );
+
+    const agentConfigs = (
+        <Accordion
+            className="w-full"
+            type="multiple"
+        >
+            {agentTypes.map((agentKey) => (
+                <AccordionItem
+                    key={agentKey}
+                    value={agentKey}
+                >
+                    <AccordionTrigger className="group text-left hover:no-underline">
+                        <div className="flex w-full items-center justify-between gap-2">
+                            <span className="group-hover:underline">{getName(agentKey)}</span>
+                            <Button
+                                asChild
+                                className={cn(
+                                    'mr-2',
+                                    (isTestLoading || isAgentTestLoading) && 'pointer-events-none opacity-50',
+                                )}
+                                size="xs"
+                                variant="outline"
+                            >
+                                <span
+                                    onClick={(event) => {
+                                        if (isTestLoading || isAgentTestLoading) {
+                                            return;
+                                        }
+
+                                        event.stopPropagation();
+                                        handleTestAgent(agentKey);
+                                    }}
+                                    onKeyDown={(event) => {
+                                        if (event.key !== 'Enter' && event.key !== ' ') {
+                                            return;
+                                        }
+
+                                        event.preventDefault();
+                                        event.stopPropagation();
+
+                                        if (isTestLoading || isAgentTestLoading) {
+                                            return;
+                                        }
+
+                                        handleTestAgent(agentKey);
+                                    }}
+                                    role="button"
+                                    tabIndex={isTestLoading || isAgentTestLoading ? -1 : 0}
+                                >
+                                    {isAgentTestLoading && currentAgentKey === agentKey ? (
+                                        <Spinner variant="circle" />
+                                    ) : (
+                                        <Play />
+                                    )}
+                                    <span className="no-underline! hover:no-underline!">
+                                        {isAgentTestLoading && currentAgentKey === agentKey ? 'Testing...' : 'Test'}
+                                    </span>
+                                </span>
+                            </Button>
+                        </div>
+                    </AccordionTrigger>
+                    <AccordionContent className="flex flex-col gap-4 pt-4">
+                        <div className="grid grid-cols-1 gap-4 p-px md:grid-cols-2">
+                            <FormModelComboboxItem
+                                control={control}
+                                disabled={isLoading}
+                                label="Model"
+                                name={`agents.${agentKey}.model`}
+                                onOptionSelect={(option) => {
+                                    const price = option?.price;
+
+                                    setValue(`agents.${agentKey}.price.input` as const, price?.input ?? null);
+                                    setValue(`agents.${agentKey}.price.output` as const, price?.output ?? null);
+                                    setValue(`agents.${agentKey}.price.cacheRead` as const, price?.cacheRead ?? null);
+                                    setValue(`agents.${agentKey}.price.cacheWrite` as const, price?.cacheWrite ?? null);
+
+                                    // Reset reasoning on model change: adaptive-only models lock
+                                    // to adaptive, others clear the now-stale mode/effort/budget.
+                                    setValue(
+                                        `agents.${agentKey}.reasoning.mode` as const,
+                                        option?.reasoning?.mode === ModelReasoningMode.AdaptiveOnly
+                                            ? ReasoningMode.Adaptive
+                                            : null,
+                                    );
+                                    setValue(`agents.${agentKey}.reasoning.effort` as const, null);
+                                    setValue(`agents.${agentKey}.reasoning.maxTokens` as const, null);
+                                }}
+                                options={availableModels}
+                                placeholder="Select or enter model name"
+                            />
+
+                            <FormInputNumberItem
+                                control={control}
+                                disabled={isLoading}
+                                label="Temperature"
+                                max="2"
+                                min="0"
+                                name={`agents.${agentKey}.temperature`}
+                                placeholder="0.7"
+                                step="0.1"
+                            />
+
+                            <FormInputNumberItem
+                                control={control}
+                                disabled={isLoading}
+                                label="Max Tokens"
+                                min="1"
+                                name={`agents.${agentKey}.maxTokens`}
+                                placeholder="1000"
+                                valueType="integer"
+                            />
+
+                            <FormInputNumberItem
+                                control={control}
+                                disabled={isLoading}
+                                label="Top P"
+                                max="1"
+                                min="0"
+                                name={`agents.${agentKey}.topP`}
+                                placeholder="0.9"
+                                step="0.01"
+                            />
+
+                            <FormInputNumberItem
+                                control={control}
+                                disabled={isLoading}
+                                label="Top K"
+                                min="1"
+                                name={`agents.${agentKey}.topK`}
+                                placeholder="40"
+                                valueType="integer"
+                            />
+
+                            <FormInputNumberItem
+                                control={control}
+                                disabled={isLoading}
+                                label="Min Length"
+                                min="0"
+                                name={`agents.${agentKey}.minLength`}
+                                placeholder="0"
+                                valueType="integer"
+                            />
+
+                            <FormInputNumberItem
+                                control={control}
+                                disabled={isLoading}
+                                label="Max Length"
+                                min="1"
+                                name={`agents.${agentKey}.maxLength`}
+                                placeholder="2000"
+                                valueType="integer"
+                            />
+
+                            <FormInputNumberItem
+                                control={control}
+                                disabled={isLoading}
+                                label="Repetition Penalty"
+                                max="2"
+                                min="0"
+                                name={`agents.${agentKey}.repetitionPenalty`}
+                                placeholder="1.0"
+                                step="0.01"
+                            />
+
+                            <FormInputNumberItem
+                                control={control}
+                                disabled={isLoading}
+                                label="Frequency Penalty"
+                                max="2"
+                                min="0"
+                                name={`agents.${agentKey}.frequencyPenalty`}
+                                placeholder="0.0"
+                                step="0.01"
+                            />
+
+                            <FormInputNumberItem
+                                control={control}
+                                disabled={isLoading}
+                                label="Presence Penalty"
+                                max="2"
+                                min="0"
+                                name={`agents.${agentKey}.presencePenalty`}
+                                placeholder="0.0"
+                                step="0.01"
+                            />
+                        </div>
+
+                        <ReasoningFields
+                            agentKey={agentKey}
+                            control={control}
+                            isLoading={isLoading}
+                            models={availableModels}
+                            setValue={setValue}
+                        />
+
+                        <div className="col-span-full p-px">
+                            <div className="mt-6 flex flex-col gap-4">
+                                <h4 className="text-sm font-medium">Price Configuration</h4>
+                                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                                    <FormInputNumberItem
+                                        control={control}
+                                        description="Price per 1M input tokens"
+                                        disabled={isLoading}
+                                        label="Input Price"
+                                        min="0"
+                                        name={`agents.${agentKey}.price.input`}
+                                        placeholder="0.001"
+                                        step="0.000001"
+                                    />
+
+                                    <FormInputNumberItem
+                                        control={control}
+                                        description="Price per 1M output tokens"
+                                        disabled={isLoading}
+                                        label="Output Price"
+                                        min="0"
+                                        name={`agents.${agentKey}.price.output`}
+                                        placeholder="0.002"
+                                        step="0.000001"
+                                    />
+
+                                    <FormInputNumberItem
+                                        control={control}
+                                        description="Price per 1M cached read tokens"
+                                        disabled={isLoading}
+                                        label="Cache Read Price"
+                                        min="0"
+                                        name={`agents.${agentKey}.price.cacheRead`}
+                                        placeholder="0.0001"
+                                        step="0.000001"
+                                    />
+
+                                    <FormInputNumberItem
+                                        control={control}
+                                        description="Price per 1M cache write tokens"
+                                        disabled={isLoading}
+                                        label="Cache Write Price"
+                                        min="0"
+                                        name={`agents.${agentKey}.price.cacheWrite`}
+                                        placeholder="0.00015"
+                                        step="0.000001"
+                                    />
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="col-span-full p-px">
+                            <div className="mt-6 flex flex-col gap-4">
+                                <h4 className="text-sm font-medium">Extra Body</h4>
+                                <FormTextareaItem
+                                    control={control}
+                                    description="Provider-specific request body fields as a JSON object, merged into every call (e.g. vLLM chat_template_kwargs)."
+                                    disabled={isLoading}
+                                    label="Extra Body (JSON)"
+                                    name={`agents.${agentKey}.extraBody`}
+                                    placeholder={'{\n    "chat_template_kwargs": { "enable_thinking": false }\n}'}
+                                />
+                            </div>
+                        </div>
+                    </AccordionContent>
+                </AccordionItem>
+            ))}
+        </Accordion>
+    );
+
+    return (
+        <div className={isDesktop ? 'flex h-[100dvh] min-h-0 flex-col' : 'flex min-h-[100dvh] flex-col'}>
+            <AppHeader>
+                <AppHeaderContent>
+                    <AppHeaderTitle icon={<Plug className="size-4 shrink-0" />}>
+                        {isNew ? 'Create Provider' : 'Edit Provider'}
+                    </AppHeaderTitle>
+                </AppHeaderContent>
+                <AppHeaderActions>
+                    <AppHeaderAction
                         disabled={isLoading || isTestLoading || isAgentTestLoading}
+                        icon={isTestLoading ? <Spinner variant="circle" /> : <Play />}
+                        label={isTestLoading ? 'Testing...' : 'Test'}
                         onClick={() => handleTest()}
                         type="button"
                         variant="outline"
-                    >
-                        {isTestLoading ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
-                        {isTestLoading ? 'Testing...' : 'Test'}
-                    </Button>
-                </div>
-
-                <div className="ml-auto flex gap-2">
-                    <Button
-                        disabled={isLoading}
-                        onClick={handleBack}
-                        type="button"
-                        variant="outline"
-                    >
-                        Cancel
-                    </Button>
-                    <Button
-                        disabled={isLoading}
+                    />
+                    <AppHeaderAction
                         form="provider-form"
+                        icon={<Save />}
+                        label={isNew ? 'Create' : 'Save'}
+                        loading={isLoading}
                         type="submit"
-                        variant="secondary"
-                    >
-                        {isLoading ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
-                        {isLoading ? 'Saving...' : isNew ? 'Create Provider' : 'Update Provider'}
-                    </Button>
-                </div>
-            </div>
+                    />
+                    {!isNew && (
+                        <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                                <Button
+                                    aria-label="Provider actions"
+                                    className="size-8 p-0"
+                                    type="button"
+                                    variant="ghost"
+                                >
+                                    <Ellipsis />
+                                </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent
+                                align="end"
+                                className="min-w-24"
+                            >
+                                <DropdownMenuItem
+                                    disabled={isDeleteLoading}
+                                    onClick={handleDelete}
+                                >
+                                    {isDeleteLoading ? <Spinner variant="circle" /> : <Trash2 />}
+                                    {isDeleteLoading ? 'Deleting...' : 'Delete'}
+                                </DropdownMenuItem>
+                            </DropdownMenuContent>
+                        </DropdownMenu>
+                    )}
+                </AppHeaderActions>
+            </AppHeader>
+            <Form {...form}>
+                <form
+                    className="flex min-h-0 flex-1 flex-col"
+                    id="provider-form"
+                    noValidate
+                    onSubmit={handleFormEvent}
+                >
+                    {isDesktop ? (
+                        <DetailSplitLayout
+                            content={agentConfigs}
+                            contentClassName="h-full min-h-0 overflow-y-auto p-4"
+                            panel={metaFields}
+                        />
+                    ) : (
+                        <div className="flex min-h-0 flex-1 flex-col gap-4 p-4">
+                            {metaFields}
+                            {agentConfigs}
+                        </div>
+                    )}
+                </form>
+            </Form>
 
             <TestResultsDialog
                 handleOpenChange={setIsTestDialogOpen}
@@ -1817,29 +2064,24 @@ const SettingsProvider = () => {
                 results={testResults}
             />
 
-            <ConfirmationDialog
-                cancelText="Cancel"
-                confirmText="Delete"
+            <DeleteProviderDialog
+                control={control}
                 handleConfirm={handleConfirmDelete}
                 handleOpenChange={setIsDeleteDialogOpen}
                 isOpen={isDeleteDialogOpen}
-                itemName={providerName}
-                itemType="provider"
             />
 
-            <ConfirmationDialog
-                cancelText="Stay"
-                confirmIcon={undefined}
-                confirmText="Leave"
-                confirmVariant="destructive"
-                description="You have unsaved changes. Are you sure you want to leave without saving?"
-                handleConfirm={handleConfirmLeave}
-                handleOpenChange={handleLeaveDialogOpenChange}
-                isOpen={isLeaveDialogOpen}
-                title="Discard changes?"
+            <UnsavedChangesDialog
+                canSave={isFormValid}
+                handleCancel={unsavedGuard.handleCancel}
+                handleDiscard={unsavedGuard.handleDiscard}
+                handleOpenChange={unsavedGuard.handleOpenChange}
+                handleSaveAndLeave={unsavedGuard.handleSaveAndLeave}
+                isOpen={unsavedGuard.isOpen}
+                isSavingFromDialog={unsavedGuard.isSavingFromDialog}
             />
-        </>
+        </div>
     );
-};
+}
 
 export default SettingsProvider;

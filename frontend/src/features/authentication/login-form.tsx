@@ -1,7 +1,4 @@
-import { zodResolver } from '@hookform/resolvers/zod';
-import { Loader2 } from 'lucide-react';
 import { useState } from 'react';
-import { useForm } from 'react-hook-form';
 import { useNavigate } from 'react-router-dom';
 import { z } from 'zod';
 
@@ -11,7 +8,11 @@ import Github from '@/components/icons/github';
 import Google from '@/components/icons/google';
 import { Button } from '@/components/ui/button';
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form';
+import { FormSubmitButton } from '@/components/ui/form-submit-button';
 import { Input } from '@/components/ui/input';
+import { InputPassword } from '@/components/ui/input-password';
+import { useAppForm } from '@/hooks/use-app-form';
+import { routes } from '@/lib/routes';
 import { useUser } from '@/providers/user-provider';
 
 import { PasswordChangeForm } from './password-change-form';
@@ -56,17 +57,17 @@ const providerActions: AuthProviderAction[] = [
 ];
 
 interface LoginFormProps {
-    providers: string[]; // OAuth providers: ['google', 'github']
+    providers: string[];
     returnUrl?: string;
 }
 
-const LoginForm = ({ providers, returnUrl = '/flows/new' }: LoginFormProps) => {
-    const form = useForm<z.infer<typeof formSchema>>({
+function LoginForm({ providers, returnUrl = routes.newFlow }: LoginFormProps) {
+    const form = useAppForm<z.infer<typeof formSchema>>({
         defaultValues: {
             mail: '',
             password: '',
         },
-        resolver: zodResolver(formSchema),
+        schema: formSchema,
     });
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [error, setError] = useState<null | string>(null);
@@ -76,7 +77,6 @@ const LoginForm = ({ providers, returnUrl = '/flows/new' }: LoginFormProps) => {
 
     const handleSubmit = async (values: z.infer<typeof formSchema>) => {
         setError(null);
-        setIsSubmitting(true);
 
         try {
             const result = await login(values);
@@ -96,8 +96,6 @@ const LoginForm = ({ providers, returnUrl = '/flows/new' }: LoginFormProps) => {
             navigate(returnUrl);
         } catch {
             setError(errorMessage);
-        } finally {
-            setIsSubmitting(false);
         }
     };
 
@@ -128,7 +126,6 @@ const LoginForm = ({ providers, returnUrl = '/flows/new' }: LoginFormProps) => {
 
     const handlePasswordChangeSuccess = () => {
         if (authInfo?.user) {
-            // Update auth info with password_change_required set to false
             const updatedAuthData = {
                 ...authInfo,
                 user: {
@@ -142,8 +139,6 @@ const LoginForm = ({ providers, returnUrl = '/flows/new' }: LoginFormProps) => {
         }
     };
 
-    // If password change is required, show password change form.
-    // Also check isAuthenticated() to ensure the user has a valid session.
     // If the session expired and user refreshed the page, the old authInfo may still
     // be in memory (race condition between clearAuth() and navigate()), but we must
     // NOT show the password change form because:
@@ -164,10 +159,9 @@ const LoginForm = ({ providers, returnUrl = '/flows/new' }: LoginFormProps) => {
                     You need to change your password before continuing.
                 </p>
                 <PasswordChangeForm
-                    isModal={false}
+                    layout="vertical"
                     onSkip={handleSkipPasswordChange}
                     onSuccess={handlePasswordChangeSuccess}
-                    showSkip={true}
                 />
             </div>
         );
@@ -177,6 +171,7 @@ const LoginForm = ({ providers, returnUrl = '/flows/new' }: LoginFormProps) => {
         <Form {...form}>
             <form
                 className="mx-auto grid w-[350px] gap-8"
+                noValidate
                 onSubmit={form.handleSubmit(handleSubmit)}
             >
                 <h1 className="text-center text-3xl font-bold">PentAGI</h1>
@@ -188,7 +183,7 @@ const LoginForm = ({ providers, returnUrl = '/flows/new' }: LoginFormProps) => {
                                 .filter((provider) => providers.includes(provider.id))
                                 .map((provider) => (
                                     <Button
-                                        disabled={isSubmitting}
+                                        disabled={isSubmitting || form.formState.isSubmitting}
                                         key={provider.id}
                                         onClick={() => handleProviderLogin(provider.id)}
                                         type="button"
@@ -237,10 +232,9 @@ const LoginForm = ({ providers, returnUrl = '/flows/new' }: LoginFormProps) => {
                             <FormItem>
                                 <FormLabel>Password</FormLabel>
                                 <FormControl>
-                                    <Input
+                                    <InputPassword
                                         {...field}
                                         placeholder="Enter your password"
-                                        type="password"
                                     />
                                 </FormControl>
                                 <FormMessage />
@@ -248,20 +242,15 @@ const LoginForm = ({ providers, returnUrl = '/flows/new' }: LoginFormProps) => {
                         )}
                     />
 
-                    <Button
-                        className="w-full"
-                        disabled={isSubmitting || (!form.formState.isValid && form.formState.isSubmitted)}
-                        type="submit"
-                    >
-                        {isSubmitting && <Loader2 className="animate-spin" />}
+                    <FormSubmitButton className="w-full">
                         <span>Sign in</span>
-                    </Button>
+                    </FormSubmitButton>
 
                     {error && <FormMessage>{error}</FormMessage>}
                 </div>
             </form>
         </Form>
     );
-};
+}
 
 export default LoginForm;

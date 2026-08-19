@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"pentagi/cmd/ftester/mocks"
 	"pentagi/pkg/config"
@@ -14,6 +15,7 @@ import (
 	"pentagi/pkg/providers/embeddings"
 	"pentagi/pkg/terminal"
 	"pentagi/pkg/tools"
+	"pentagi/pkg/tools/searchers"
 
 	"github.com/sirupsen/logrus"
 	"github.com/vxcontrol/cloud/anonymizer"
@@ -36,6 +38,49 @@ func (at *agentTool) IsAvailable() bool {
 	return at.handler != nil
 }
 
+// searcherTool adapts a single searchers.Searcher to the tools.Tool interface so the
+// ftester can exercise one engine against its real API by name (e.g. `ftester -flow N
+// tavily`). Production agents never take this path — they call web_search, which
+// orchestrates the engines — but per-engine access is valuable for debugging a single
+// provider's live integration and response parsing in isolation.
+type searcherTool struct {
+	searcher searchers.Searcher
+}
+
+func (s *searcherTool) IsAvailable() bool { return s.searcher.IsAvailable() }
+
+func (s *searcherTool) Handle(ctx context.Context, name string, args json.RawMessage) (string, error) {
+	req, err := searchRequestFromArgs(name, args)
+	if err != nil {
+		return "", err
+	}
+	return s.searcher.Handle(ctx, req)
+}
+
+// searchRequestFromArgs builds the engine-agnostic searchers.Request from a single
+// engine's LLM-facing arguments. Sploitus carries extra exploit fields; every other
+// engine uses SearchAction.
+func searchRequestFromArgs(name string, args json.RawMessage) (searchers.Request, error) {
+	if name == tools.SploitusToolName {
+		var a tools.SploitusAction
+		if err := json.Unmarshal(args, &a); err != nil {
+			return searchers.Request{}, fmt.Errorf("failed to unmarshal %s args: %w", name, err)
+		}
+		return searchers.Request{
+			Query:       a.Query,
+			MaxResults:  a.MaxResults.Int(),
+			ExploitType: a.ExploitType.String(),
+			Sort:        a.Sort.String(),
+		}, nil
+	}
+
+	var a tools.SearchAction
+	if err := json.Unmarshal(args, &a); err != nil {
+		return searchers.Request{}, fmt.Errorf("failed to unmarshal %s args: %w", name, err)
+	}
+	return searchers.Request{Query: a.Query, MaxResults: a.MaxResults.Int()}, nil
+}
+
 // toolExecutor holds the necessary data for creating and managing tools
 type toolExecutor struct {
 	flowExecutor   tools.FlowToolsExecutor
@@ -45,8 +90,10 @@ type toolExecutor struct {
 	dockerClient   docker.DockerClient
 	handlers       providers.FlowProviderHandlers
 	store          *pgvector.Store
+	embedder       embeddings.Embedder
 	graphitiClient *graphiti.Client
 	proxies        mocks.ProxyProviders
+	userID         int64
 	flowID         int64
 	taskID         *int64
 	subtaskID      *int64
@@ -60,7 +107,7 @@ func newToolExecutor(
 	dockerClient docker.DockerClient,
 	handlers providers.FlowProviderHandlers,
 	proxies mocks.ProxyProviders,
-	flowID int64,
+	userID, flowID int64,
 	taskID, subtaskID *int64,
 	embedder embeddings.Embedder,
 	graphitiClient *graphiti.Client,
@@ -71,6 +118,7 @@ func newToolExecutor(
 			context.Background(),
 			pgvector.WithConnectionURL(cfg.DatabaseURL),
 			pgvector.WithEmbedder(embedder),
+			pgvector.WithCollectionName("langchain"),
 		)
 		if err != nil {
 			logrus.WithError(err).Error("failed to create pgvector store")
@@ -100,8 +148,10 @@ func newToolExecutor(
 		dockerClient:   dockerClient,
 		handlers:       handlers,
 		store:          store,
+		embedder:       embedder,
 		graphitiClient: graphitiClient,
 		proxies:        proxies,
+		userID:         userID,
 		flowID:         flowID,
 		taskID:         taskID,
 		subtaskID:      subtaskID,
@@ -133,8 +183,10 @@ func (te *toolExecutor) GetTool(ctx context.Context, funcName string) (tools.Too
 			te.subtaskID,
 			containerID,
 			containerLID,
+			te.cfg.TenantPrefix(),
 			te.dockerClient,
 			te.proxies.GetTermLogProvider(),
+			time.Duration(te.cfg.TerminalToolTimeout)*time.Second,
 		), nil
 
 	case tools.FileToolName:
@@ -145,8 +197,10 @@ func (te *toolExecutor) GetTool(ctx context.Context, funcName string) (tools.Too
 			te.subtaskID,
 			containerID,
 			containerLID,
+			te.cfg.TenantPrefix(),
 			te.dockerClient,
 			te.proxies.GetTermLogProvider(),
+			time.Duration(te.cfg.TerminalToolTimeout)*time.Second,
 		), nil
 
 	case tools.BrowserToolName:
@@ -160,71 +214,55 @@ func (te *toolExecutor) GetTool(ctx context.Context, funcName string) (tools.Too
 			te.proxies.GetScreenshotProvider(),
 		), nil
 
-	case tools.GoogleToolName:
-		return tools.NewGoogleTool(
+	case tools.WebSearchToolName:
+		// The unified web_search orchestrator, as production agents use it. A nil page
+		// fetcher disables the optional internal analytics engine, which is out of
+		// scope for the function tester.
+		return tools.NewWebSearchTool(
 			te.cfg,
 			te.flowID,
 			te.taskID,
 			te.subtaskID,
 			te.proxies.GetSearchLogProvider(),
+			te.GetSummarizer(),
+			nil,
 		), nil
+
+	// Individual engines: not used by agents (they call web_search), but exposed here
+	// so a developer can test one provider's real API in isolation. Each searcher is
+	// wrapped in searcherTool to bridge the searchers.Searcher → tools.Tool interface.
+	case tools.GoogleToolName:
+		return &searcherTool{searcher: searchers.NewGoogle(te.cfg)}, nil
 
 	case tools.DuckDuckGoToolName:
-		return tools.NewDuckDuckGoTool(
-			te.cfg,
-			te.flowID,
-			te.taskID,
-			te.subtaskID,
-			te.proxies.GetSearchLogProvider(),
-		), nil
+		return &searcherTool{searcher: searchers.NewDuckDuckGo(te.cfg)}, nil
 
 	case tools.TavilyToolName:
-		return tools.NewTavilyTool(
-			te.cfg,
-			te.flowID,
-			te.taskID,
-			te.subtaskID,
-			te.proxies.GetSearchLogProvider(),
-			te.GetSummarizer(),
-		), nil
+		return &searcherTool{searcher: searchers.NewTavily(te.cfg, searchers.SummarizeHandler(te.GetSummarizer()))}, nil
+
+	case tools.FirecrawlToolName:
+		return &searcherTool{searcher: searchers.NewFirecrawl(te.cfg, searchers.SummarizeHandler(te.GetSummarizer()))}, nil
 
 	case tools.TraversaalToolName:
-		return tools.NewTraversaalTool(
-			te.cfg,
-			te.flowID,
-			te.taskID,
-			te.subtaskID,
-			te.proxies.GetSearchLogProvider(),
-		), nil
+		return &searcherTool{searcher: searchers.NewTraversaal(te.cfg)}, nil
 
 	case tools.PerplexityToolName:
-		return tools.NewPerplexityTool(
-			te.cfg,
-			te.flowID,
-			te.taskID,
-			te.subtaskID,
-			te.proxies.GetSearchLogProvider(),
-			te.GetSummarizer(),
-		), nil
+		return &searcherTool{searcher: searchers.NewPerplexity(te.cfg, searchers.SummarizeHandler(te.GetSummarizer()))}, nil
 
 	case tools.SearxngToolName:
-		return tools.NewSearxngTool(
-			te.cfg,
-			te.flowID,
-			te.taskID,
-			te.subtaskID,
-			te.proxies.GetSearchLogProvider(),
-			te.GetSummarizer(),
-		), nil
+		return &searcherTool{searcher: searchers.NewSearxng(te.cfg, searchers.SummarizeHandler(te.GetSummarizer()))}, nil
 
 	case tools.SploitusToolName:
-		return tools.NewSploitusTool(
-			te.cfg,
-			te.flowID,
-			te.taskID,
-			te.subtaskID,
-			te.proxies.GetSearchLogProvider(),
-		), nil
+		return &searcherTool{searcher: searchers.NewSploitus(te.cfg)}, nil
+
+	case "internal":
+		// The internal browser-analytics engine — the opt-in alternative to Tavily.
+		// Not an agent-facing tool (agents call web_search); exposed here so it can be
+		// exercised in isolation. Requires WEB_SEARCH_INTERNAL_ENABLED=true, a configured
+		// scraper (SCRAPER_PUBLIC_URL / SCRAPER_PRIVATE_URL), and at least one available
+		// link engine (e.g. google/duckduckgo) — otherwise IsAvailable() is false.
+		fetcher := tools.NewBrowserPageFetcher(te.flowID, te.taskID, te.subtaskID, te.cfg, te.proxies.GetScreenshotProvider())
+		return &searcherTool{searcher: tools.NewInternalEngine(te.cfg, te.GetSummarizer(), fetcher)}, nil
 
 	case tools.SearchInMemoryToolName:
 		return tools.NewMemoryTool(
@@ -235,32 +273,47 @@ func (te *toolExecutor) GetTool(ctx context.Context, funcName string) (tools.Too
 
 	case tools.SearchGuideToolName:
 		return tools.NewGuideTool(
+			te.userID,
 			te.flowID,
 			te.taskID,
 			te.subtaskID,
 			te.replacer,
 			te.store,
+			te.embedder,
+			te.db,
+			te.cfg.EmbeddingMaxTextBytes,
 			te.proxies.GetVectorStoreLogProvider(),
+			te.proxies.GetKnowledgeProvider(),
 		), nil
 
 	case tools.SearchAnswerToolName:
 		return tools.NewSearchTool(
+			te.userID,
 			te.flowID,
 			te.taskID,
 			te.subtaskID,
 			te.replacer,
 			te.store,
+			te.embedder,
+			te.db,
+			te.cfg.EmbeddingMaxTextBytes,
 			te.proxies.GetVectorStoreLogProvider(),
+			te.proxies.GetKnowledgeProvider(),
 		), nil
 
 	case tools.SearchCodeToolName:
 		return tools.NewCodeTool(
+			te.userID,
 			te.flowID,
 			te.taskID,
 			te.subtaskID,
 			te.replacer,
 			te.store,
+			te.embedder,
+			te.db,
+			te.cfg.EmbeddingMaxTextBytes,
 			te.proxies.GetVectorStoreLogProvider(),
+			te.proxies.GetKnowledgeProvider(),
 		), nil
 
 	case tools.GraphitiSearchToolName:
@@ -268,6 +321,7 @@ func (te *toolExecutor) GetTool(ctx context.Context, funcName string) (tools.Too
 			te.flowID,
 			te.taskID,
 			te.subtaskID,
+			te.cfg.GroupID(te.flowID),
 			te.graphitiClient,
 		), nil
 

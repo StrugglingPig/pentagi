@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/google/uuid"
@@ -224,6 +225,7 @@ func TestGetSecretPatterns_AllFields(t *testing.T) {
 		GLMAPIKey:               "glm-123",
 		KimiAPIKey:              "kimi-123",
 		QwenAPIKey:              "qwen-123",
+		MiniMaxAPIKey:           "minimax-123",
 		GoogleAPIKey:            "AIza123",
 		GoogleCXKey:             "cx-123",
 		OAuthGoogleClientID:     "google-client-id",
@@ -240,7 +242,7 @@ func TestGetSecretPatterns_AllFields(t *testing.T) {
 
 	patterns := cfg.GetSecretPatterns()
 
-	expectedCount := 29
+	expectedCount := 30
 	if len(patterns) != expectedCount {
 		t.Errorf("expected %d patterns, got %d", expectedCount, len(patterns))
 	}
@@ -269,16 +271,17 @@ func clearConfigEnv(t *testing.T) {
 	t.Helper()
 
 	envVars := []string{
-		"DATABASE_URL", "DEBUG", "DATA_DIR", "ASK_USER", "INSTALLATION_ID", "LICENSE_KEY",
+		"DATABASE_URL", "DEBUG", "DATA_DIR", "ASK_USER", "TENANT_ID", "INSTALLATION_ID", "LICENSE_KEY",
 		"DOCKER_INSIDE", "DOCKER_NET_ADMIN", "DOCKER_SOCKET", "DOCKER_NETWORK",
-		"DOCKER_PUBLIC_IP", "DOCKER_WORK_DIR", "DOCKER_DEFAULT_IMAGE", "DOCKER_DEFAULT_IMAGE_FOR_PENTEST",
+		"DOCKER_INSIDE_HOST", "DOCKER_INSIDE_TLS_VERIFY", "DOCKER_INSIDE_CERT_PATH",
+		"DOCKER_PUBLIC_IP", "DOCKER_WORK_DIR", "DOCKER_DEFAULT_IMAGE", "DOCKER_DEFAULT_IMAGE_FOR_PENTEST", "TERMINAL_TOOL_TIMEOUT",
 		"SERVER_PORT", "SERVER_HOST", "SERVER_USE_SSL", "SERVER_SSL_KEY", "SERVER_SSL_CRT",
 		"STATIC_URL", "STATIC_DIR", "CORS_ORIGINS", "COOKIE_SIGNING_SALT",
 		"SCRAPER_PUBLIC_URL", "SCRAPER_PRIVATE_URL",
 		"OPEN_AI_KEY", "OPEN_AI_SERVER_URL",
 		"ANTHROPIC_API_KEY", "ANTHROPIC_SERVER_URL",
 		"EMBEDDING_URL", "EMBEDDING_KEY", "EMBEDDING_MODEL",
-		"EMBEDDING_STRIP_NEW_LINES", "EMBEDDING_BATCH_SIZE", "EMBEDDING_PROVIDER",
+		"EMBEDDING_STRIP_NEW_LINES", "EMBEDDING_BATCH_SIZE", "EMBEDDING_MAX_TEXT_BYTES", "EMBEDDING_PROVIDER",
 		"SUMMARIZER_PRESERVE_LAST", "SUMMARIZER_USE_QA", "SUMMARIZER_SUM_MSG_HUMAN_IN_QA",
 		"SUMMARIZER_LAST_SEC_BYTES", "SUMMARIZER_MAX_BP_BYTES",
 		"SUMMARIZER_MAX_QA_SECTIONS", "SUMMARIZER_MAX_QA_BYTES", "SUMMARIZER_KEEP_QA_SECTIONS",
@@ -294,6 +297,7 @@ func clearConfigEnv(t *testing.T) {
 		"GLM_API_KEY", "GLM_SERVER_URL", "GLM_PROVIDER",
 		"KIMI_API_KEY", "KIMI_SERVER_URL", "KIMI_PROVIDER",
 		"QWEN_API_KEY", "QWEN_SERVER_URL", "QWEN_PROVIDER",
+		"MINIMAX_API_KEY", "MINIMAX_SERVER_URL", "MINIMAX_PROVIDER",
 		"DUCKDUCKGO_ENABLED", "DUCKDUCKGO_REGION", "DUCKDUCKGO_SAFESEARCH", "DUCKDUCKGO_TIME_RANGE",
 		"SPLOITUS_ENABLED",
 		"GOOGLE_API_KEY", "GOOGLE_CX_KEY", "GOOGLE_LR_KEY",
@@ -422,11 +426,16 @@ func TestNewConfig_SearchEngineDefaults(t *testing.T) {
 	config, err := NewConfig()
 	require.NoError(t, err)
 
-	assert.Equal(t, "sonar", config.PerplexityModel)
+	assert.Equal(t, "sonar-pro", config.PerplexityModel)
 	assert.Equal(t, "low", config.PerplexityContextSize)
 	assert.Equal(t, "general", config.SearxngCategories)
 	assert.Equal(t, "0", config.SearxngSafeSearch)
 	assert.Equal(t, "lang_en", config.GoogleLRKey)
+
+	// web_search internal analytics engine: off by default, with bounded scraping.
+	assert.False(t, config.WebSearchInternalEnabled)
+	assert.Equal(t, 5, config.WebSearchInternalMaxSites)
+	assert.Equal(t, 10240, config.WebSearchInternalMaxSiteBytes)
 }
 
 func TestEnsureInstallationID_GeneratesNewUUID(t *testing.T) {
@@ -548,6 +557,31 @@ func TestNewConfig_HTTPClientTimeout(t *testing.T) {
 	})
 }
 
+func TestNewConfig_TerminalToolTimeout(t *testing.T) {
+	clearConfigEnv(t)
+	t.Chdir(t.TempDir())
+
+	t.Run("default timeout", func(t *testing.T) {
+		config, err := NewConfig()
+		require.NoError(t, err)
+		assert.Equal(t, 1200, config.TerminalToolTimeout)
+	})
+
+	t.Run("custom timeout", func(t *testing.T) {
+		t.Setenv("TERMINAL_TOOL_TIMEOUT", "900")
+		config, err := NewConfig()
+		require.NoError(t, err)
+		assert.Equal(t, 900, config.TerminalToolTimeout)
+	})
+
+	t.Run("zero timeout", func(t *testing.T) {
+		t.Setenv("TERMINAL_TOOL_TIMEOUT", "0")
+		config, err := NewConfig()
+		require.NoError(t, err)
+		assert.Equal(t, 0, config.TerminalToolTimeout)
+	})
+}
+
 func TestNewConfig_AgentSupervisionDefaults(t *testing.T) {
 	clearConfigEnv(t)
 	t.Chdir(t.TempDir())
@@ -583,4 +617,152 @@ func TestNewConfig_AgentSupervisionOverride(t *testing.T) {
 	assert.Equal(t, 150, config.MaxGeneralAgentToolCalls)
 	assert.Equal(t, 30, config.MaxLimitedAgentToolCalls)
 	assert.Equal(t, true, config.AgentPlanningStepEnabled)
+}
+
+// TestWorkerDockerEnvDisabled pins the first rule: with DOCKER_INSIDE off, a
+// worker container receives no Docker configuration at all, even if the
+// DOCKER_INSIDE_* values happen to be populated.
+func TestWorkerDockerEnvDisabled(t *testing.T) {
+	c := &Config{
+		DockerInside:          false,
+		DockerInsideHost:      "tcp://dind:2376",
+		DockerInsideTLSVerify: "1",
+		DockerInsideCertPath:  "/certs",
+	}
+
+	if env := c.WorkerDockerEnv(); env != nil {
+		t.Errorf("WorkerDockerEnv() = %v, want nil when DOCKER_INSIDE is disabled", env)
+	}
+	if p := c.WorkerDockerCertPath(); p != "" {
+		t.Errorf("WorkerDockerCertPath() = %q, want %q when DOCKER_INSIDE is disabled", p, "")
+	}
+}
+
+func TestWorkerDockerEnvStripsInsideSegment(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *Config
+		want []string
+	}{
+		{
+			name: "all three set",
+			cfg: &Config{
+				DockerInside:          true,
+				DockerInsideHost:      "tcp://dind:2376",
+				DockerInsideTLSVerify: "1",
+				DockerInsideCertPath:  "/certs/client",
+			},
+			want: []string{
+				"DOCKER_HOST=tcp://dind:2376",
+				"DOCKER_TLS_VERIFY=1",
+				"DOCKER_CERT_PATH=/certs/client",
+			},
+		},
+		{
+			name: "host only — empty values are omitted, not passed as blanks",
+			cfg: &Config{
+				DockerInside:     true,
+				DockerInsideHost: "tcp://dind:2375",
+			},
+			want: []string{"DOCKER_HOST=tcp://dind:2375"},
+		},
+		{
+			name: "nothing configured",
+			cfg:  &Config{DockerInside: true},
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.WorkerDockerEnv(); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("WorkerDockerEnv() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestWorkerDockerSocket covers the socket-selection rule, which is the part
+// with security consequences: autodetection of the host socket must stop as soon
+// as a dedicated daemon endpoint is designated for sandboxes.
+func TestWorkerDockerSocket(t *testing.T) {
+	tests := []struct {
+		name           string
+		cfg            *Config
+		wantSocket     string
+		wantAutodetect bool
+	}{
+		{
+			name:           "nothing configured — historical autodetect",
+			cfg:            &Config{},
+			wantSocket:     "",
+			wantAutodetect: true,
+		},
+		{
+			name:           "explicit socket wins",
+			cfg:            &Config{DockerSocket: "/var/run/docker.sock"},
+			wantSocket:     "/var/run/docker.sock",
+			wantAutodetect: false,
+		},
+		{
+			name:           "inside host set — no socket, no autodetect",
+			cfg:            &Config{DockerInsideHost: "tcp://dind:2376"},
+			wantSocket:     "",
+			wantAutodetect: false,
+		},
+		{
+			name: "explicit socket still wins over inside host",
+			cfg: &Config{
+				DockerSocket:     "/run/custom.sock",
+				DockerInsideHost: "tcp://dind:2376",
+			},
+			wantSocket:     "/run/custom.sock",
+			wantAutodetect: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			socket, autodetect := tt.cfg.WorkerDockerSocket()
+			if socket != tt.wantSocket || autodetect != tt.wantAutodetect {
+				t.Errorf("WorkerDockerSocket() = (%q, %v), want (%q, %v)",
+					socket, autodetect, tt.wantSocket, tt.wantAutodetect)
+			}
+		})
+	}
+}
+
+// TestWorkerDockerBackwardCompatibility guards the untouched path: an
+// installation that never sets a DOCKER_INSIDE_* value must behave exactly as it
+// did before the feature existed — autodetect the host socket, inject nothing.
+func TestWorkerDockerBackwardCompatibility(t *testing.T) {
+	for _, inside := range []bool{false, true} {
+		c := &Config{DockerInside: inside}
+
+		socket, autodetect := c.WorkerDockerSocket()
+		if socket != "" || !autodetect {
+			t.Errorf("DOCKER_INSIDE=%v: WorkerDockerSocket() = (%q, %v), want (\"\", true)",
+				inside, socket, autodetect)
+		}
+		if env := c.WorkerDockerEnv(); env != nil {
+			t.Errorf("DOCKER_INSIDE=%v: WorkerDockerEnv() = %v, want nil", inside, env)
+		}
+		if p := c.WorkerDockerCertPath(); p != "" {
+			t.Errorf("DOCKER_INSIDE=%v: WorkerDockerCertPath() = %q, want \"\"", inside, p)
+		}
+	}
+}
+
+func TestWorkerDockerHelpersNilSafe(t *testing.T) {
+	var c *Config
+
+	if env := c.WorkerDockerEnv(); env != nil {
+		t.Errorf("WorkerDockerEnv() = %v, want nil", env)
+	}
+	if p := c.WorkerDockerCertPath(); p != "" {
+		t.Errorf("WorkerDockerCertPath() = %q, want \"\"", p)
+	}
+	if socket, autodetect := c.WorkerDockerSocket(); socket != "" || !autodetect {
+		t.Errorf("WorkerDockerSocket() = (%q, %v), want (\"\", true)", socket, autodetect)
+	}
 }

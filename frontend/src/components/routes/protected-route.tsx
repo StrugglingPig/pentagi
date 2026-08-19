@@ -1,30 +1,27 @@
 import * as React from 'react';
 import { Navigate, useLocation } from 'react-router-dom';
 
-import { getReturnUrlParam } from '@/lib/utils/auth';
+import { routes } from '@/lib/routes';
 import { useUser } from '@/providers/user-provider';
 
-const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
+function ProtectedRoute({ children }: { children: React.ReactNode }) {
     const location = useLocation();
     const { isAuthenticated, isLoading } = useUser();
 
-    // Wait for initial auth check to complete
     if (isLoading) {
         return null;
     }
 
     if (!isAuthenticated()) {
-        const returnParam = getReturnUrlParam(location.pathname);
-
         return (
             <Navigate
                 replace
-                to={`/login${returnParam}`}
+                to={routes.login(location.pathname)}
             />
         );
     }
 
     return children;
-};
+}
 
 export default ProtectedRoute;

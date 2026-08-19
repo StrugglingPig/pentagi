@@ -1,10 +1,11 @@
 import type { ReactNode } from 'react';
 
-import { createContext, use } from 'react';
+import { useQuery } from '@apollo/client/react';
+import { createContext, use, useMemo } from 'react';
 
 import type { SettingsFragmentFragment } from '@/graphql/types';
 
-import { useSettingsQuery } from '@/graphql/types';
+import { SettingsDocument } from '@/graphql/types';
 import { useUser } from '@/providers/user-provider';
 
 interface SettingsContextType {
@@ -14,27 +15,25 @@ interface SettingsContextType {
 
 const SystemSettingsContext = createContext<SettingsContextType | undefined>(undefined);
 
-export const SystemSettingsProvider = ({ children }: { children: ReactNode }) => {
+export function SystemSettingsProvider({ children }: { children: ReactNode }) {
     const { isAuthenticated } = useUser();
 
-    // Load settings via GraphQL query only when user is authenticated
-    const { data: settingsData, loading } = useSettingsQuery({
+    const { data: settingsData, loading } = useQuery(SettingsDocument, {
         skip: !isAuthenticated(),
     });
 
-    return (
-        <SystemSettingsContext
-            value={{
-                isLoading: loading,
-                settings: settingsData?.settings ?? null,
-            }}
-        >
-            {children}
-        </SystemSettingsContext>
+    const value = useMemo<SettingsContextType>(
+        () => ({
+            isLoading: loading,
+            settings: settingsData?.settings ?? null,
+        }),
+        [loading, settingsData?.settings],
     );
-};
 
-export const useSystemSettings = () => {
+    return <SystemSettingsContext value={value}>{children}</SystemSettingsContext>;
+}
+
+export function useSystemSettings() {
     const context = use(SystemSettingsContext);
 
     if (context === undefined) {
@@ -42,4 +41,4 @@ export const useSystemSettings = () => {
     }
 
     return context;
-};
+}

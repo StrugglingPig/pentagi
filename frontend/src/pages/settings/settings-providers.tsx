@@ -1,41 +1,22 @@
-import type { ColumnDef } from '@tanstack/react-table';
+import type { ColumnDef, Row } from '@tanstack/react-table';
 
-import { format, isToday } from 'date-fns';
-import { enUS } from 'date-fns/locale';
-import {
-    AlertCircle,
-    ArrowDown,
-    ArrowUp,
-    ChevronDown,
-    Copy,
-    Loader2,
-    MoreHorizontal,
-    Pencil,
-    Plus,
-    Settings,
-    Trash,
-} from 'lucide-react';
+import { useMutation, useQuery } from '@apollo/client/react';
+import { ChevronDown, Copy, Ellipsis, Pencil, Plug, Plus, Settings, Trash } from 'lucide-react';
 import { useCallback, useMemo, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
+import { toast } from 'sonner';
 
 import type { ProviderConfigFragmentFragment } from '@/graphql/types';
 
-import Anthropic from '@/components/icons/anthropic';
-import Bedrock from '@/components/icons/bedrock';
-import Custom from '@/components/icons/custom';
-import DeepSeek from '@/components/icons/deepseek';
-import Gemini from '@/components/icons/gemini';
-import GLM from '@/components/icons/glm';
-import Kimi from '@/components/icons/kimi';
-import Ollama from '@/components/icons/ollama';
-import OpenAi from '@/components/icons/open-ai';
-import Qwen from '@/components/icons/qwen';
+import { providerIcons } from '@/components/icons/provider-icon';
+import { AppHeader, AppHeaderActions, AppHeaderContent, AppHeaderTitle } from '@/components/layouts/app/app-header';
 import ConfirmationDialog from '@/components/shared/confirmation-dialog';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { ErrorState } from '@/components/shared/error-state';
+import { LoadingState } from '@/components/shared/loading-state';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ContextMenuItem, ContextMenuSeparator } from '@/components/ui/context-menu';
-import { DataTable } from '@/components/ui/data-table';
+import { DataTable, DataTableColumnHeader } from '@/components/ui/data-table';
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -43,148 +24,94 @@ import {
     DropdownMenuSeparator,
     DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { StatusCard } from '@/components/ui/status-card';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import { ProviderType, useDeleteProviderMutation, useSettingsProvidersQuery } from '@/graphql/types';
+import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty';
+import { Spinner } from '@/components/ui/spinner';
+import { DeleteProviderDocument, ProviderType, SettingsProvidersDocument } from '@/graphql/types';
+import { useTableState } from '@/hooks/use-table-state';
+import { routes } from '@/lib/routes';
+import { formatDate } from '@/lib/utils/format';
 type Provider = ProviderConfigFragmentFragment;
 
-const providerIcons: Record<ProviderType, React.ComponentType<any>> = {
-    [ProviderType.Anthropic]: Anthropic,
-    [ProviderType.Bedrock]: Bedrock,
-    [ProviderType.Custom]: Custom,
-    [ProviderType.Deepseek]: DeepSeek,
-    [ProviderType.Gemini]: Gemini,
-    [ProviderType.Glm]: GLM,
-    [ProviderType.Kimi]: Kimi,
-    [ProviderType.Ollama]: Ollama,
-    [ProviderType.Openai]: OpenAi,
-    [ProviderType.Qwen]: Qwen,
+// Exhaustive Record so a newly-added ProviderType is a compile error here, not a
+// provider silently missing from the create-provider menu.
+const providerLabels: Record<ProviderType, string> = {
+    [ProviderType.Anthropic]: 'Anthropic',
+    [ProviderType.Bedrock]: 'Bedrock',
+    [ProviderType.Custom]: 'Custom',
+    [ProviderType.Deepseek]: 'DeepSeek',
+    [ProviderType.Gemini]: 'Gemini',
+    [ProviderType.Glm]: 'GLM',
+    [ProviderType.Kimi]: 'Kimi',
+    [ProviderType.Minimax]: 'MiniMax',
+    [ProviderType.Ollama]: 'Ollama',
+    [ProviderType.Openai]: 'OpenAI',
+    [ProviderType.Qwen]: 'Qwen',
 };
 
-const providerTypes = [
-    { label: 'Anthropic', type: ProviderType.Anthropic },
-    { label: 'Bedrock', type: ProviderType.Bedrock },
-    { label: 'Custom', type: ProviderType.Custom },
-    { label: 'DeepSeek', type: ProviderType.Deepseek },
-    { label: 'Gemini', type: ProviderType.Gemini },
-    { label: 'GLM', type: ProviderType.Glm },
-    { label: 'Kimi', type: ProviderType.Kimi },
-    { label: 'Ollama', type: ProviderType.Ollama },
-    { label: 'OpenAI', type: ProviderType.Openai },
-    { label: 'Qwen', type: ProviderType.Qwen },
-];
+const providerTypes = (Object.keys(providerLabels) as ProviderType[]).map((type) => ({
+    label: providerLabels[type],
+    type,
+}));
 
-const formatDateTime = (dateString: string) => {
-    const date = new Date(dateString);
-
-    if (isToday(date)) {
-        return format(date, 'HH:mm:ss', { locale: enUS });
-    }
-
-    return format(date, 'd MMM yyyy', { locale: enUS });
-};
-
-const formatFullDateTime = (dateString: string) => {
-    const date = new Date(dateString);
-
-    return format(date, 'd MMM yyyy, HH:mm:ss', { locale: enUS });
-};
-
-const SettingsProvidersHeader = () => {
+export function SettingsProvidersHeader() {
     const navigate = useNavigate();
+    // Cached: the list above already fetched this query, so the read is local.
+    const { data } = useQuery(SettingsProvidersDocument);
+    const enabled = data?.settingsProviders?.enabled;
+    // Only offer types whose API key is configured — a disabled-type provider is unusable
+    // for flows (the create form guards the same against a hand-typed ?type=). Empty while
+    // the query is in flight or when no key is configured anywhere.
+    const availableTypes = providerTypes.filter(({ type }) => enabled?.[type as keyof typeof enabled]);
 
     const handleProviderCreate = (providerType: string) => {
-        navigate(`/settings/providers/new?type=${providerType}`);
+        navigate(routes.settings.newProvider({ type: providerType }));
     };
 
     return (
-        <div className="flex items-center justify-between gap-4">
-            <p className="text-muted-foreground">Manage language model providers</p>
-
-            <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                    <Button variant="secondary">
-                        Create Provider
-                        <ChevronDown className="size-4" />
-                    </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent
-                    align="end"
-                    style={{
-                        width: 'var(--radix-dropdown-menu-trigger-width)',
-                    }}
+        <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+                <Button
+                    aria-label="Create provider — choose type"
+                    className="w-8 shrink-0 px-0 md:w-auto md:px-3"
+                    size="sm"
+                    variant="secondary"
                 >
-                    {providerTypes.map(({ label, type }) => {
-                        const Icon = providerIcons[type];
+                    <Plus />
+                    <span className="hidden md:inline">Create Provider</span>
+                    <ChevronDown className="hidden size-4 md:inline-flex" />
+                </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+                {availableTypes.length === 0 ? (
+                    <DropdownMenuItem disabled>No available provider types</DropdownMenuItem>
+                ) : (
+                    availableTypes.map(({ label, type }) => {
+                        const Icon = providerIcons[type]?.icon;
 
                         return (
                             <DropdownMenuItem
                                 key={type}
                                 onClick={() => handleProviderCreate(type)}
                             >
-                                {Icon && <Icon className="size-4" />}
+                                {Icon && <Icon />}
                                 {label}
                             </DropdownMenuItem>
                         );
-                    })}
-                </DropdownMenuContent>
-            </DropdownMenu>
-        </div>
+                    })
+                )}
+            </DropdownMenuContent>
+        </DropdownMenu>
     );
-};
+}
 
-const SettingsProviders = () => {
-    const [searchParams, setSearchParams] = useSearchParams();
-    const { data, error, loading: isLoading } = useSettingsProvidersQuery();
-    const [deleteProvider, { error: deleteError, loading: isDeleteLoading }] = useDeleteProviderMutation();
-    const [deleteErrorMessage, setDeleteErrorMessage] = useState<null | string>(null);
+function SettingsProviders() {
+    const { data, error, loading: isLoading, refetch } = useQuery(SettingsProvidersDocument);
+    const [deleteProvider, { loading: isDeleteLoading }] = useMutation(DeleteProviderDocument);
     const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
     const [deletingProvider, setDeletingProvider] = useState<null | Provider>(null);
     const navigate = useNavigate();
 
-
-    // Get current page from URL
-    const currentPage = useMemo(() => {
-        const page = searchParams.get('page');
-
-        return page ? Math.max(0, Number.parseInt(page, 10) - 1) : 0;
-    }, [searchParams]);
-
-    // Handle page change
-    const handlePageChange = useCallback(
-        (pageIndex: number) => {
-            const newParams = new URLSearchParams(searchParams);
-
-            if (pageIndex === 0) {
-                newParams.delete('page');
-            } else {
-                newParams.set('page', String(pageIndex + 1));
-            }
-
-            setSearchParams(newParams);
-        },
-        [searchParams, setSearchParams],
-    );
-
-    // Three-way sorting handler: null -> asc -> desc -> null
-    const handleColumnSort = useCallback(
-        (column: {
-            clearSorting: () => void;
-            getIsSorted: () => 'asc' | 'desc' | false;
-            toggleSorting: (desc?: boolean) => void;
-        }) => {
-            const sorted = column.getIsSorted();
-
-            if (sorted === 'asc') {
-                column.toggleSorting(true);
-            } else if (sorted === 'desc') {
-                column.clearSorting();
-            } else {
-                column.toggleSorting(false);
-            }
-        },
-        [],
-    );
+    const { filter, pageIndex: currentPage, setFilter, setPage: handlePageChange } = useTableState();
 
     const handleProviderDelete = useCallback(
         async (providerId: string | undefined) => {
@@ -193,17 +120,16 @@ const SettingsProviders = () => {
             }
 
             try {
-                setDeleteErrorMessage(null);
-
                 await deleteProvider({
                     refetchQueries: ['settingsProviders'],
                     variables: { providerId: providerId.toString() },
                 });
 
                 setDeletingProvider(null);
-                setDeleteErrorMessage(null);
             } catch (error) {
-                setDeleteErrorMessage(error instanceof Error ? error.message : 'An error occurred while deleting');
+                toast.error('Failed to delete provider', {
+                    description: error instanceof Error ? error.message : undefined,
+                });
             }
         },
         [deleteProvider],
@@ -211,14 +137,14 @@ const SettingsProviders = () => {
 
     const handleProviderEdit = useCallback(
         (providerId: string) => {
-            navigate(`/settings/providers/${providerId}`);
+            navigate(routes.settings.provider(providerId));
         },
         [navigate],
     );
 
     const handleProviderClone = useCallback(
         (providerId: string) => {
-            navigate(`/settings/providers/new?id=${providerId}`);
+            navigate(routes.settings.newProvider({ id: providerId }));
         },
         [navigate],
     );
@@ -232,59 +158,43 @@ const SettingsProviders = () => {
         () => [
             {
                 accessorKey: 'name',
-                cell: ({ row }) => <div className="font-medium">{row.getValue('name')}</div>,
+                cell: ({ row }) => <div className="truncate font-medium">{row.getValue('name')}</div>,
                 enableHiding: false,
-                header: ({ column }) => {
-                    const sorted = column.getIsSorted();
-
-                    return (
-                        <Button
-                            className="text-muted-foreground hover:text-primary flex items-center gap-2 p-0 no-underline hover:no-underline"
-                            onClick={() => handleColumnSort(column)}
-                            variant="link"
-                        >
-                            Name
-                            {sorted === 'asc' ? (
-                                <ArrowDown className="size-4" />
-                            ) : sorted === 'desc' ? (
-                                <ArrowUp className="size-4" />
-                            ) : null}
-                        </Button>
-                    );
-                },
-                size: 400,
+                header: ({ column }) => (
+                    <DataTableColumnHeader
+                        column={column}
+                        title="Name"
+                    />
+                ),
+                // Name flexes to fill remaining width — fixed `size` would push
+                // the Type column off-screen on narrow viewports (e.g. 375px).
+                meta: { searchable: true },
             },
             {
                 accessorKey: 'type',
                 cell: ({ row }) => {
                     const providerType = row.getValue('type') as ProviderType;
-                    const Icon = providerIcons[providerType];
+                    const Icon = providerIcons[providerType]?.icon;
+                    const label = providerTypes.find((p) => p.type === providerType)?.label || providerType;
 
                     return (
-                        <Badge variant="outline">
-                            {Icon && <Icon className="mr-1 size-3" />}
-                            {providerTypes.find((p) => p.type === providerType)?.label || providerType}
+                        <Badge
+                            className="max-w-full whitespace-nowrap"
+                            variant="outline"
+                        >
+                            {Icon && <Icon className="mr-1 size-3 shrink-0" />}
+                            <span className="truncate">{label}</span>
                         </Badge>
                     );
                 },
-                header: ({ column }) => {
-                    const sorted = column.getIsSorted();
-
-                    return (
-                        <Button
-                            className="text-muted-foreground hover:text-primary flex items-center gap-2 p-0 no-underline hover:no-underline"
-                            onClick={() => handleColumnSort(column)}
-                            variant="link"
-                        >
-                            Type
-                            {sorted === 'asc' ? (
-                                <ArrowDown className="size-4" />
-                            ) : sorted === 'desc' ? (
-                                <ArrowUp className="size-4" />
-                            ) : null}
-                        </Button>
-                    );
-                },
+                header: ({ column }) => (
+                    <DataTableColumnHeader
+                        column={column}
+                        title="Type"
+                    />
+                ),
+                meta: { searchable: true },
+                minSize: 110,
                 size: 160,
             },
             {
@@ -292,35 +202,15 @@ const SettingsProviders = () => {
                 cell: ({ row }) => {
                     const dateString = row.getValue('createdAt') as string;
 
-                    return (
-                        <Tooltip>
-                            <TooltipTrigger asChild>
-                                <div className="cursor-default text-sm">{formatDateTime(dateString)}</div>
-                            </TooltipTrigger>
-                            <TooltipContent>
-                                <div className="text-xs">{formatFullDateTime(dateString)}</div>
-                            </TooltipContent>
-                        </Tooltip>
-                    );
+                    return <div className="text-sm">{formatDate(new Date(dateString))}</div>;
                 },
-                header: ({ column }) => {
-                    const sorted = column.getIsSorted();
-
-                    return (
-                        <Button
-                            className="text-muted-foreground hover:text-primary flex items-center gap-2 p-0 no-underline hover:no-underline"
-                            onClick={() => handleColumnSort(column)}
-                            variant="link"
-                        >
-                            Created
-                            {sorted === 'asc' ? (
-                                <ArrowDown className="size-4" />
-                            ) : sorted === 'desc' ? (
-                                <ArrowUp className="size-4" />
-                            ) : null}
-                        </Button>
-                    );
-                },
+                header: ({ column }) => (
+                    <DataTableColumnHeader
+                        column={column}
+                        title="Created"
+                    />
+                ),
+                meta: { columnMenuLabel: 'Created' },
                 size: 120,
                 sortingFn: (rowA, rowB) => {
                     const dateA = new Date(rowA.getValue('createdAt') as string);
@@ -334,35 +224,14 @@ const SettingsProviders = () => {
                 cell: ({ row }) => {
                     const dateString = row.getValue('updatedAt') as string;
 
-                    return (
-                        <Tooltip>
-                            <TooltipTrigger asChild>
-                                <div className="cursor-default text-sm">{formatDateTime(dateString)}</div>
-                            </TooltipTrigger>
-                            <TooltipContent>
-                                <div className="text-xs">{formatFullDateTime(dateString)}</div>
-                            </TooltipContent>
-                        </Tooltip>
-                    );
+                    return <div className="text-sm">{formatDate(new Date(dateString))}</div>;
                 },
-                header: ({ column }) => {
-                    const sorted = column.getIsSorted();
-
-                    return (
-                        <Button
-                            className="text-muted-foreground hover:text-primary flex items-center gap-2 p-0 no-underline hover:no-underline"
-                            onClick={() => handleColumnSort(column)}
-                            variant="link"
-                        >
-                            Updated
-                            {sorted === 'asc' ? (
-                                <ArrowDown className="size-4" />
-                            ) : sorted === 'desc' ? (
-                                <ArrowUp className="size-4" />
-                            ) : null}
-                        </Button>
-                    );
-                },
+                header: ({ column }) => (
+                    <DataTableColumnHeader
+                        column={column}
+                        title="Updated"
+                    />
+                ),
                 size: 120,
                 sortingFn: (rowA, rowB) => {
                     const dateA = new Date(rowA.getValue('updatedAt') as string);
@@ -380,11 +249,11 @@ const SettingsProviders = () => {
                             <DropdownMenu>
                                 <DropdownMenuTrigger asChild>
                                     <Button
+                                        aria-label="Open menu"
                                         className="size-8 p-0"
                                         variant="ghost"
                                     >
-                                        <span className="sr-only">Open menu</span>
-                                        <MoreHorizontal className="size-4" />
+                                        <Ellipsis />
                                     </Button>
                                 </DropdownMenuTrigger>
                                 <DropdownMenuContent
@@ -396,7 +265,7 @@ const SettingsProviders = () => {
                                         Edit
                                     </DropdownMenuItem>
                                     <DropdownMenuItem onClick={() => handleProviderClone(provider.id)}>
-                                        <Copy className="size-4" />
+                                        <Copy />
                                         Clone
                                     </DropdownMenuItem>
                                     <DropdownMenuSeparator />
@@ -406,12 +275,12 @@ const SettingsProviders = () => {
                                     >
                                         {isDeleteLoading && deletingProvider?.id === provider.id ? (
                                             <>
-                                                <Loader2 className="size-4 animate-spin" />
+                                                <Spinner variant="circle" />
                                                 Deleting...
                                             </>
                                         ) : (
                                             <>
-                                                <Trash className="size-4" />
+                                                <Trash />
                                                 Delete
                                             </>
                                         )}
@@ -428,35 +297,26 @@ const SettingsProviders = () => {
                 size: 48,
             },
         ],
-        [
-            handleColumnSort,
-            handleProviderClone,
-            handleProviderDeleteDialogOpen,
-            handleProviderEdit,
-            isDeleteLoading,
-            deletingProvider,
-        ],
+        [handleProviderClone, handleProviderDeleteDialogOpen, handleProviderEdit, isDeleteLoading, deletingProvider],
     );
 
-    const renderSubComponent = ({ row }: { row: any }) => {
-        const provider = row.original as Provider;
+    const renderSubComponent = ({ row }: { row: Row<Provider> }) => {
+        const provider = row.original;
         const { agents } = provider;
 
         if (!agents) {
             return <div className="text-muted-foreground p-4 text-sm">No agent configuration available</div>;
         }
 
-        // Convert camelCase key to display name (e.g., 'simpleJson' -> 'Simple Json')
         const getName = (key: string): string =>
             key.replaceAll(/([A-Z])/g, ' $1').replace(/^./, (item) => item.toUpperCase());
 
-        // Recursively extract all fields from an object, flattening nested objects
-        const getFields = (obj: any, prefix = ''): { label: string; value: boolean | number | string }[] => {
+        const getFields = (obj: unknown, prefix = ''): { label: string; value: boolean | number | string }[] => {
             if (!obj || typeof obj !== 'object') {
                 return [];
             }
 
-            return Object.entries(obj)
+            return Object.entries(obj as Record<string, unknown>)
                 .filter(([key, value]) => key !== '__typename' && !!value)
                 .flatMap(([key, value]) => {
                     const label = `${prefix ? `${prefix} ` : ''}${getName(key)}`;
@@ -467,7 +327,6 @@ const SettingsProviders = () => {
                 });
         };
 
-        // Dynamically create agent types from object keys
         const agentTypes = Object.entries(agents)
             .filter(([key]) => key !== '__typename')
             .map(([key, data]) => ({
@@ -483,7 +342,6 @@ const SettingsProviders = () => {
                 <hr className="border-muted-foreground/20 my-4" />
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-5">
                     {agentTypes.map(({ data, key, name }) => {
-                        // Get all fields from data, including nested objects
                         const fields = data ? getFields(data) : [];
 
                         return (
@@ -535,92 +393,108 @@ const SettingsProviders = () => {
         [deletingProvider, handleProviderClone, handleProviderDeleteDialogOpen, handleProviderEdit, isDeleteLoading],
     );
 
-    if (isLoading) {
-        return (
-            <div className="flex flex-col gap-4">
+    const pageHeader = (
+        <AppHeader>
+            <AppHeaderContent>
+                <AppHeaderTitle icon={<Plug className="size-4 shrink-0" />}>Providers</AppHeaderTitle>
+            </AppHeaderContent>
+            <AppHeaderActions>
                 <SettingsProvidersHeader />
-                <StatusCard
-                    description="Please wait while we fetch your provider configurations"
-                    icon={<Loader2 className="text-muted-foreground size-16 animate-spin" />}
-                    title="Loading providers..."
-                />
-            </div>
+            </AppHeaderActions>
+        </AppHeader>
+    );
+
+    if (isLoading && !data) {
+        return (
+            <>
+                {pageHeader}
+                <div className="flex flex-1 flex-col gap-4 p-4">
+                    <LoadingState
+                        description="Please wait while we fetch your provider configurations"
+                        title="Loading providers..."
+                    />
+                </div>
+            </>
         );
     }
 
-    if (error) {
+    // Error surface only when there's no data — a failed background refetch must not blank a working list.
+    if (error && !data) {
         return (
-            <div className="flex flex-col gap-4">
-                <SettingsProvidersHeader />
-                <Alert variant="destructive">
-                    <AlertCircle className="size-4" />
-                    <AlertTitle>Error loading providers</AlertTitle>
-                    <AlertDescription>{error.message}</AlertDescription>
-                </Alert>
-            </div>
+            <>
+                {pageHeader}
+                <div className="flex flex-1 flex-col gap-4 p-4">
+                    <ErrorState
+                        message={error.message}
+                        onRetry={refetch}
+                        title="Error loading providers"
+                    />
+                </div>
+            </>
         );
     }
 
     const providers = data?.settingsProviders?.userDefined || [];
 
-    // Check if providers list is empty
     if (providers.length === 0) {
         return (
-            <div className="flex flex-col gap-4">
-                <SettingsProvidersHeader />
-                <StatusCard
-                    action={
-                        <Button
-                            onClick={() => navigate('/settings/providers/new')}
-                            variant="secondary"
-                        >
-                            <Plus className="size-4" />
-                            Add Provider
-                        </Button>
-                    }
-                    description="Get started by adding your first language model provider"
-                    icon={<Settings className="text-muted-foreground size-8" />}
-                    title="No providers configured"
-                />
-            </div>
+            <>
+                {pageHeader}
+                <div className="flex flex-1 flex-col gap-4 p-4">
+                    <Empty>
+                        <EmptyHeader>
+                            <EmptyMedia variant="icon">
+                                <Settings />
+                            </EmptyMedia>
+                            <EmptyTitle>No providers configured</EmptyTitle>
+                            <EmptyDescription>
+                                Get started by adding your first language model provider
+                            </EmptyDescription>
+                        </EmptyHeader>
+                        <EmptyContent>
+                            <Button
+                                onClick={() => navigate(routes.settings.newProvider())}
+                                variant="secondary"
+                            >
+                                <Plus />
+                                Add Provider
+                            </Button>
+                        </EmptyContent>
+                    </Empty>
+                </div>
+            </>
         );
     }
 
     return (
-        <div className="flex flex-col gap-4">
-            <SettingsProvidersHeader />
+        <>
+            {pageHeader}
+            <div className="flex flex-1 flex-col gap-4 p-4">
+                <DataTable<Provider>
+                    columns={columns}
+                    data={providers}
+                    empty={{ entityName: 'providers' }}
+                    filterPlaceholder="Filter providers..."
+                    filterValue={filter}
+                    onFilterChange={setFilter}
+                    onPageChange={handlePageChange}
+                    pageIndex={currentPage}
+                    renderRowContextMenu={renderRowContextMenu}
+                    renderSubComponent={renderSubComponent}
+                />
 
-            {/* Delete Error Alert */}
-            {(deleteError || deleteErrorMessage) && (
-                <Alert variant="destructive">
-                    <AlertCircle className="size-4" />
-                    <AlertTitle>Error deleting provider</AlertTitle>
-                    <AlertDescription>{deleteError?.message || deleteErrorMessage}</AlertDescription>
-                </Alert>
-            )}
-
-            <DataTable<Provider>
-                columns={columns}
-                data={providers}
-                filterColumn="name"
-                filterPlaceholder="Filter provider names..."
-                onPageChange={handlePageChange}
-                pageIndex={currentPage}
-                renderRowContextMenu={renderRowContextMenu}
-                renderSubComponent={renderSubComponent}
-            />
-
-            <ConfirmationDialog
-                cancelText="Cancel"
-                confirmText="Delete"
-                handleConfirm={() => handleProviderDelete(deletingProvider?.id)}
-                handleOpenChange={setIsDeleteDialogOpen}
-                isOpen={isDeleteDialogOpen}
-                itemName={deletingProvider?.name}
-                itemType="provider"
-            />
-        </div>
+                <ConfirmationDialog
+                    cancelText="Cancel"
+                    confirmText="Delete"
+                    handleConfirm={() => handleProviderDelete(deletingProvider?.id)}
+                    handleOpenChange={setIsDeleteDialogOpen}
+                    isOpen={isDeleteDialogOpen}
+                    itemName={deletingProvider?.name}
+                    itemType="provider"
+                />
+            </div>
+        </>
     );
-};
+}
 
 export default SettingsProviders;

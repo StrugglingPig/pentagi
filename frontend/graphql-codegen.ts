@@ -6,14 +6,14 @@ const config: CodegenConfig = {
         './src/graphql/types.ts': {
             config: {
                 dedupeFragments: true,
+                enumType: 'native',
                 exportFragmentSpreadSubTypes: true,
                 inlineFragmentTypes: 'combine',
-                preResolveTypes: true,
+                scalars: { Map: 'Record<string, unknown>', Time: 'string' },
                 skipTypename: true,
                 useTypeImports: true,
-                withHooks: true,
             },
-            plugins: ['typescript', 'typescript-operations', 'typescript-react-apollo'],
+            plugins: ['typescript-operations', 'typed-document-node'],
         },
     },
     hooks: {

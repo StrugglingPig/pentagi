@@ -1,36 +1,31 @@
 import type { ColumnDef } from '@tanstack/react-table';
 
-import { format, isToday } from 'date-fns';
+import { useMutation, useQuery, useSubscription } from '@apollo/client/react';
+import { format } from 'date-fns';
 import { enUS } from 'date-fns/locale';
-import {
-    AlertCircle,
-    ArrowDown,
-    ArrowUp,
-    CalendarIcon,
-    Check,
-    Copy,
-    ExternalLink,
-    Key,
-    Loader2,
-    MoreHorizontal,
-    Pencil,
-    Plus,
-    Trash,
-    X,
-} from 'lucide-react';
-import { useCallback, useMemo, useRef, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { CalendarIcon, Check, Copy, Ellipsis, ExternalLink, Key, Pencil, Plus, Trash, X } from 'lucide-react';
+import { useCallback, useId, useMemo, useState } from 'react';
+import { type Control, Controller, useFormState } from 'react-hook-form';
 import { toast } from 'sonner';
+import * as z from 'zod';
 
 import type { ApiTokenFragmentFragment } from '@/graphql/types';
 
+import {
+    AppHeader,
+    AppHeaderAction,
+    AppHeaderActions,
+    AppHeaderContent,
+    AppHeaderTitle,
+} from '@/components/layouts/app/app-header';
 import ConfirmationDialog from '@/components/shared/confirmation-dialog';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { ErrorState } from '@/components/shared/error-state';
+import { LoadingState } from '@/components/shared/loading-state';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Calendar } from '@/components/ui/calendar';
 import { ContextMenuItem, ContextMenuSeparator } from '@/components/ui/context-menu';
-import { DataTable } from '@/components/ui/data-table';
+import { DataTable, DataTableColumnHeader } from '@/components/ui/data-table';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import {
     DropdownMenu,
@@ -39,34 +34,54 @@ import {
     DropdownMenuSeparator,
     DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty';
 import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { StatusCard } from '@/components/ui/status-card';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { Spinner } from '@/components/ui/spinner';
 import {
+    ApiTokenCreatedDocument,
+    ApiTokenDeletedDocument,
+    ApiTokensDocument,
+    ApiTokenUpdatedDocument,
+    CreateApiTokenDocument,
+    DeleteApiTokenDocument,
     TokenStatus as TokenStatusEnum,
-    useApiTokenCreatedSubscription,
-    useApiTokenDeletedSubscription,
-    useApiTokensQuery,
-    useApiTokenUpdatedSubscription,
-    useCreateApiTokenMutation,
-    useDeleteApiTokenMutation,
-    useUpdateApiTokenMutation,
+    UpdateApiTokenDocument,
 } from '@/graphql/types';
+import { useAppForm } from '@/hooks/use-app-form';
+import { useTableState } from '@/hooks/use-table-state';
 import { cn } from '@/lib/utils';
+import { formatDate } from '@/lib/utils/format';
 import { baseUrl } from '@/models/api';
 
 type APIToken = ApiTokenFragmentFragment;
 
-interface CreateFormData {
-    expiresAt: Date | null;
-    name: string;
-}
+// 100 mirrors the backend cap (server/models/api_tokens.go + the createAPIToken/updateAPIToken resolvers).
+export const tokenNameSchema = z.string().trim().max(100, 'Token name must be 100 characters or less').default('');
 
-interface EditFormData {
-    status: TokenStatusEnum;
-}
+const createTokenFormSchema = z.object({
+    // Nullable in form input (the date picker starts empty); the refine gates
+    // `formState.isValid` so the Create button stays disabled until a date is set.
+    expiresAt: z
+        .date()
+        .nullable()
+        .refine((value) => value !== null, { message: 'Expiration date is required' }),
+    name: tokenNameSchema,
+});
+
+const editTokenFormSchema = z.object({
+    name: tokenNameSchema,
+    status: z.nativeEnum(TokenStatusEnum),
+});
+
+type CreateTokenFormInput = z.input<typeof createTokenFormSchema>;
+type CreateTokenFormValues = z.output<typeof createTokenFormSchema>;
+type EditTokenFormInput = z.input<typeof editTokenFormSchema>;
+type EditTokenFormValues = z.output<typeof editTokenFormSchema>;
+
+const CREATE_TOKEN_DEFAULTS: CreateTokenFormInput = { expiresAt: null, name: '' };
+const EDIT_TOKEN_DEFAULTS: EditTokenFormInput = { name: '', status: TokenStatusEnum.Active };
 
 const isTokenExpired = (token: APIToken): boolean => {
     const expiresAt = new Date(token.createdAt);
@@ -104,22 +119,6 @@ const getStatusDisplay = (
     return { label: token.status, variant: 'secondary' };
 };
 
-const formatDateTime = (dateString: string) => {
-    const date = new Date(dateString);
-
-    if (isToday(date)) {
-        return format(date, 'HH:mm:ss', { locale: enUS });
-    }
-
-    return format(date, 'd MMM yyyy', { locale: enUS });
-};
-
-const formatFullDateTime = (dateString: string) => {
-    const date = new Date(dateString);
-
-    return format(date, 'd MMM yyyy, HH:mm:ss', { locale: enUS });
-};
-
 const calculateTTL = (expiresAt: Date): number => {
     const now = new Date();
     const diffMs = expiresAt.getTime() - now.getTime();
@@ -140,44 +139,6 @@ const copyToClipboard = async (text: string): Promise<boolean> => {
     }
 };
 
-const SettingsAPITokensHeader = ({ onCreateClick }: { onCreateClick: () => void }) => {
-    return (
-        <div className="flex items-center justify-between gap-4">
-            <div className="flex flex-col gap-2">
-                <p className="text-muted-foreground">Manage API tokens for programmatic access</p>
-                <div className="flex gap-4 text-sm">
-                    <a
-                        className="text-primary inline-flex items-center gap-1 underline hover:no-underline"
-                        href={`${window.location.origin}${baseUrl}/graphql/playground`}
-                        rel="noopener noreferrer"
-                        target="_blank"
-                    >
-                        GraphQL Playground
-                        <ExternalLink className="size-3" />
-                    </a>
-                    <a
-                        className="text-primary inline-flex items-center gap-1 underline hover:no-underline"
-                        href={`${window.location.origin}${baseUrl}/swagger/index.html`}
-                        rel="noopener noreferrer"
-                        target="_blank"
-                    >
-                        Swagger UI
-                        <ExternalLink className="size-3" />
-                    </a>
-                </div>
-            </div>
-
-            <Button
-                onClick={onCreateClick}
-                variant="secondary"
-            >
-                <Plus className="size-4" />
-                Create Token
-            </Button>
-        </div>
-    );
-};
-
 const createNewTokenPlaceholder: APIToken = {
     createdAt: new Date().toISOString(),
     id: 'create-new',
@@ -190,147 +151,214 @@ const createNewTokenPlaceholder: APIToken = {
     userId: '0',
 };
 
-const SettingsAPITokens = () => {
-    const [searchParams, setSearchParams] = useSearchParams();
-    const { data, error, loading: isLoading } = useApiTokensQuery();
-    const [createAPIToken, { error: createError, loading: isCreateLoading }] = useCreateApiTokenMutation();
-    const [updateAPIToken, { error: updateError, loading: isUpdateLoading }] = useUpdateApiTokenMutation();
-    const [deleteAPIToken, { error: deleteError, loading: isDeleteLoading }] = useDeleteApiTokenMutation();
+// Inline-row action buttons live in their own components so the validity
+// subscription via `useFormState` re-renders only this small subtree on form
+// changes, not the entire `SettingsAPITokens` parent / DataTable.
+function CreateRowActions({
+    control,
+    isLoading,
+    onCancel,
+    onSubmit,
+}: {
+    control: Control<CreateTokenFormInput>;
+    isLoading: boolean;
+    onCancel: () => void;
+    onSubmit: () => void;
+}) {
+    const { isValid } = useFormState({ control });
+
+    return (
+        <div className="flex justify-end">
+            <Button
+                aria-label={isLoading ? 'Submitting…' : 'Submit'}
+                className="shrink-0"
+                disabled={isLoading || !isValid}
+                onClick={onSubmit}
+                size="icon-sm"
+                variant="ghost"
+            >
+                {isLoading ? <Spinner variant="circle" /> : <Check />}
+            </Button>
+            <Button
+                aria-label="Cancel"
+                className="shrink-0"
+                onClick={onCancel}
+                size="icon-sm"
+                variant="ghost"
+            >
+                <X />
+            </Button>
+        </div>
+    );
+}
+
+function EditRowActions({
+    control,
+    isLoading,
+    onCancel,
+    onSubmit,
+}: {
+    control: Control<EditTokenFormInput>;
+    isLoading: boolean;
+    onCancel: () => void;
+    onSubmit: () => void;
+}) {
+    const { isValid } = useFormState({ control });
+
+    return (
+        <div className="flex justify-end">
+            <Button
+                aria-label={isLoading ? 'Submitting…' : 'Submit'}
+                className="shrink-0"
+                disabled={isLoading || !isValid}
+                onClick={onSubmit}
+                size="icon-sm"
+                variant="ghost"
+            >
+                {isLoading ? <Spinner variant="circle" /> : <Check />}
+            </Button>
+            <Button
+                aria-label="Cancel"
+                className="shrink-0"
+                onClick={onCancel}
+                size="icon-sm"
+                variant="ghost"
+            >
+                <X />
+            </Button>
+        </div>
+    );
+}
+
+function SettingsAPITokens() {
+    const { data, error, loading: isLoading, refetch } = useQuery(ApiTokensDocument);
+    const [createAPIToken, { loading: isCreateLoading }] = useMutation(CreateApiTokenDocument);
+    const [updateAPIToken, { loading: isUpdateLoading }] = useMutation(UpdateApiTokenDocument);
+    const [deleteAPIToken, { loading: isDeleteLoading }] = useMutation(DeleteApiTokenDocument);
 
     const [editingTokenId, setEditingTokenId] = useState<null | string>(null);
     const [creatingToken, setCreatingToken] = useState(false);
-    const [editFormData, setEditFormData] = useState<EditFormData>({ status: TokenStatusEnum.Active });
-    const [createFormData, setCreateFormData] = useState<CreateFormData>({ expiresAt: null, name: '' });
     const [tokenSecret, setTokenSecret] = useState<null | string>(null);
     const [showTokenDialog, setShowTokenDialog] = useState(false);
-    const [deleteErrorMessage, setDeleteErrorMessage] = useState<null | string>(null);
     const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
     const [deletingToken, setDeletingToken] = useState<APIToken | null>(null);
-    const editingInputRef = useRef<HTMLInputElement>(null);
-    const creatingInputRef = useRef<HTMLInputElement>(null);
 
-    // Get current page from URL
-    const currentPage = useMemo(() => {
-        const page = searchParams.get('page');
+    // Stable per-instance ids — keep label/for and a11y warnings clean even when
+    // the row re-mounts due to subscription-driven refetches.
+    const createNameFieldId = useId();
+    const editNameFieldId = useId();
 
-        return page ? Math.max(0, Number.parseInt(page, 10) - 1) : 0;
-    }, [searchParams]);
+    // Form state lives in the parent so that subscription-driven DataTable
+    // re-renders and row remounts cannot drop user input. <Controller> in each
+    // cell re-subscribes to this state on remount — no values are lost.
+    const createForm = useAppForm<CreateTokenFormInput, unknown, CreateTokenFormValues>({
+        defaultValues: CREATE_TOKEN_DEFAULTS,
+        schema: createTokenFormSchema,
+    });
+    const editForm = useAppForm<EditTokenFormInput, unknown, EditTokenFormValues>({
+        defaultValues: EDIT_TOKEN_DEFAULTS,
+        schema: editTokenFormSchema,
+    });
 
-    // Handle page change
-    const handlePageChange = useCallback(
-        (pageIndex: number) => {
-            const newParams = new URLSearchParams(searchParams);
+    const { filter, pageIndex: currentPage, setFilter, setPage: handlePageChange } = useTableState();
 
-            if (pageIndex === 0) {
-                newParams.delete('page');
-            } else {
-                newParams.set('page', String(pageIndex + 1));
-            }
-
-            setSearchParams(newParams);
+    useSubscription(ApiTokenCreatedDocument, {
+        onData: ({ client }) => {
+            client.refetchQueries({ include: ['apiTokens'] });
         },
-        [searchParams, setSearchParams],
+    });
+
+    useSubscription(ApiTokenUpdatedDocument, {
+        onData: ({ client }) => {
+            client.refetchQueries({ include: ['apiTokens'] });
+        },
+    });
+
+    useSubscription(ApiTokenDeletedDocument, {
+        onData: ({ client }) => {
+            client.refetchQueries({ include: ['apiTokens'] });
+        },
+    });
+
+    const handleEdit = useCallback(
+        (token: APIToken) => {
+            setEditingTokenId(token.tokenId);
+            editForm.reset({ name: token.name ?? '', status: token.status });
+        },
+        [editForm],
     );
-
-    // Three-way sorting handler: null -> asc -> desc -> null
-    const handleColumnSort = useCallback(
-        (column: {
-            clearSorting: () => void;
-            getIsSorted: () => 'asc' | 'desc' | false;
-            toggleSorting: (desc?: boolean) => void;
-        }) => {
-            const sorted = column.getIsSorted();
-
-            if (sorted === 'asc') {
-                column.toggleSorting(true);
-            } else if (sorted === 'desc') {
-                column.clearSorting();
-            } else {
-                column.toggleSorting(false);
-            }
-        },
-        [],
-    );
-
-    useApiTokenCreatedSubscription({
-        onData: ({ client }) => {
-            client.refetchQueries({ include: ['apiTokens'] });
-        },
-    });
-
-    useApiTokenUpdatedSubscription({
-        onData: ({ client }) => {
-            client.refetchQueries({ include: ['apiTokens'] });
-        },
-    });
-
-    useApiTokenDeletedSubscription({
-        onData: ({ client }) => {
-            client.refetchQueries({ include: ['apiTokens'] });
-        },
-    });
-
-    const handleEdit = useCallback((token: APIToken) => {
-        setEditingTokenId(token.tokenId);
-        setEditFormData({
-            status: token.status,
-        });
-    }, []);
 
     const handleCancelEdit = useCallback(() => {
         setEditingTokenId(null);
-        setEditFormData({ status: TokenStatusEnum.Active });
-    }, []);
+        editForm.reset(EDIT_TOKEN_DEFAULTS);
+    }, [editForm]);
 
     const handleSave = useCallback(
         async (tokenId: string) => {
-            const name = editingInputRef.current?.value.trim() || null;
+            const valid = await editForm.trigger();
+
+            if (!valid) {
+                return;
+            }
+
+            const values = editForm.getValues();
 
             try {
                 await updateAPIToken({
                     refetchQueries: ['apiTokens'],
                     variables: {
                         input: {
-                            name,
-                            status: editFormData.status,
+                            name: values.name?.trim() || null,
+                            status: values.status,
                         },
                         tokenId,
                     },
                 });
 
                 setEditingTokenId(null);
-                setEditFormData({ status: TokenStatusEnum.Active });
+                editForm.reset(EDIT_TOKEN_DEFAULTS);
             } catch (error) {
-                console.error('Failed to update token:', error);
+                toast.error('Failed to update token', {
+                    description: error instanceof Error ? error.message : undefined,
+                });
             }
         },
-        [editFormData.status, updateAPIToken],
+        [editForm, updateAPIToken],
     );
 
     const handleCreateNew = useCallback(() => {
         setCreatingToken(true);
-        setCreateFormData({ expiresAt: null, name: '' });
-    }, []);
+        createForm.reset(CREATE_TOKEN_DEFAULTS);
+        // The create row is prepended at data index 0, so an active filter or a non-first
+        // page would hide it. Clearing the filter also resets pageIndex to 0.
+        setFilter('');
+    }, [createForm, setFilter]);
 
     const handleCancelCreate = useCallback(() => {
         setCreatingToken(false);
-        setCreateFormData({ expiresAt: null, name: '' });
-    }, []);
+        createForm.reset(CREATE_TOKEN_DEFAULTS);
+    }, [createForm]);
 
     const handleCreate = useCallback(async () => {
-        if (!createFormData.expiresAt) {
+        const valid = await createForm.trigger();
+
+        if (!valid) {
             return;
         }
 
-        const name = creatingInputRef.current?.value.trim() || null;
+        const values = createForm.getValues();
+
+        if (!values.expiresAt) {
+            return;
+        }
 
         try {
-            const ttl = calculateTTL(createFormData.expiresAt);
+            const ttl = calculateTTL(values.expiresAt);
             const result = await createAPIToken({
                 refetchQueries: ['apiTokens'],
                 variables: {
                     input: {
-                        name,
+                        name: values.name?.trim() || null,
                         ttl,
                     },
                 },
@@ -342,11 +370,13 @@ const SettingsAPITokens = () => {
             }
 
             setCreatingToken(false);
-            setCreateFormData({ expiresAt: null, name: '' });
+            createForm.reset(CREATE_TOKEN_DEFAULTS);
         } catch (error) {
-            console.error('Failed to create token:', error);
+            toast.error('Failed to create token', {
+                description: error instanceof Error ? error.message : undefined,
+            });
         }
-    }, [createAPIToken, createFormData.expiresAt]);
+    }, [createAPIToken, createForm]);
 
     const handleDeleteDialogOpen = useCallback((token: APIToken) => {
         setDeletingToken(token);
@@ -360,17 +390,16 @@ const SettingsAPITokens = () => {
             }
 
             try {
-                setDeleteErrorMessage(null);
-
                 await deleteAPIToken({
                     refetchQueries: ['apiTokens'],
                     variables: { tokenId },
                 });
 
                 setDeletingToken(null);
-                setDeleteErrorMessage(null);
             } catch (error) {
-                setDeleteErrorMessage(error instanceof Error ? error.message : 'An error occurred while deleting');
+                toast.error('Failed to delete token', {
+                    description: error instanceof Error ? error.message : undefined,
+                });
             }
         },
         [deleteAPIToken],
@@ -399,57 +428,56 @@ const SettingsAPITokens = () => {
 
                     if (isCreating) {
                         return (
-                            <Input
-                                autoFocus
-                                className="h-8"
-                                defaultValue=""
-                                key="create-name-input"
-                                placeholder="Token name (optional)"
-                                ref={creatingInputRef}
+                            <Controller
+                                control={createForm.control}
+                                name="name"
+                                render={({ field }) => (
+                                    <Input
+                                        {...field}
+                                        autoComplete="off"
+                                        autoFocus
+                                        className="h-8"
+                                        id={createNameFieldId}
+                                        placeholder="Token name (optional)"
+                                    />
+                                )}
                             />
                         );
                     }
 
                     if (isEditing) {
-                        const tokenName = token.name || '';
-
                         return (
-                            <Input
-                                autoFocus
-                                className="h-8"
-                                defaultValue={tokenName}
-                                key={`edit-name-input-${token.tokenId}`}
-                                placeholder="Token name (optional)"
-                                ref={editingInputRef}
+                            <Controller
+                                control={editForm.control}
+                                name="name"
+                                render={({ field }) => (
+                                    <Input
+                                        {...field}
+                                        autoComplete="off"
+                                        autoFocus
+                                        className="h-8"
+                                        id={editNameFieldId}
+                                        placeholder="Token name (optional)"
+                                    />
+                                )}
                             />
                         );
                     }
 
                     return (
                         <div className="font-medium">
-                            {token.name || <span className="text-muted-foreground">(unnamed)</span>}
+                            {token.name || <span className="text-muted-foreground font-normal italic">(unnamed)</span>}
                         </div>
                     );
                 },
                 enableHiding: false,
-                header: ({ column }) => {
-                    const sorted = column.getIsSorted();
-
-                    return (
-                        <Button
-                            className="text-muted-foreground hover:text-primary flex items-center gap-2 p-0 no-underline hover:no-underline"
-                            onClick={() => handleColumnSort(column)}
-                            variant="link"
-                        >
-                            Name
-                            {sorted === 'asc' ? (
-                                <ArrowDown className="size-4" />
-                            ) : sorted === 'desc' ? (
-                                <ArrowUp className="size-4" />
-                            ) : null}
-                        </Button>
-                    );
-                },
+                header: ({ column }) => (
+                    <DataTableColumnHeader
+                        column={column}
+                        title="Name"
+                    />
+                ),
+                meta: { searchable: true },
                 size: 300,
             },
             {
@@ -468,6 +496,7 @@ const SettingsAPITokens = () => {
                         <div className="flex items-center gap-2">
                             <code className="text-sm">{tokenId}</code>
                             <Button
+                                aria-label="Copy token ID"
                                 className="size-6 p-0"
                                 onClick={() => handleCopyTokenId(tokenId)}
                                 variant="ghost"
@@ -478,24 +507,13 @@ const SettingsAPITokens = () => {
                     );
                 },
                 enableHiding: false,
-                header: ({ column }) => {
-                    const sorted = column.getIsSorted();
-
-                    return (
-                        <Button
-                            className="text-muted-foreground hover:text-primary flex items-center gap-2 p-0 no-underline hover:no-underline"
-                            onClick={() => handleColumnSort(column)}
-                            variant="link"
-                        >
-                            Token ID
-                            {sorted === 'asc' ? (
-                                <ArrowDown className="size-4" />
-                            ) : sorted === 'desc' ? (
-                                <ArrowUp className="size-4" />
-                            ) : null}
-                        </Button>
-                    );
-                },
+                header: ({ column }) => (
+                    <DataTableColumnHeader
+                        column={column}
+                        title="Token ID"
+                    />
+                ),
+                meta: { columnMenuLabel: 'Token ID', searchable: true },
                 size: 200,
             },
             {
@@ -518,45 +536,38 @@ const SettingsAPITokens = () => {
                         }
 
                         return (
-                            <Select
-                                onValueChange={(value) =>
-                                    setEditFormData((prev) => ({ ...prev, status: value as TokenStatusEnum }))
-                                }
-                                value={editFormData.status}
-                            >
-                                <SelectTrigger className="h-8 w-32">
-                                    <SelectValue />
-                                </SelectTrigger>
-                                <SelectContent>
-                                    <SelectGroup>
-                                        <SelectItem value={TokenStatusEnum.Active}>active</SelectItem>
-                                        <SelectItem value={TokenStatusEnum.Revoked}>revoked</SelectItem>
-                                    </SelectGroup>
-                                </SelectContent>
-                            </Select>
+                            <Controller
+                                control={editForm.control}
+                                name="status"
+                                render={({ field }) => (
+                                    <Select
+                                        onValueChange={field.onChange}
+                                        value={field.value}
+                                    >
+                                        <SelectTrigger className="h-8 w-32">
+                                            <SelectValue />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                            <SelectGroup>
+                                                <SelectItem value={TokenStatusEnum.Active}>active</SelectItem>
+                                                <SelectItem value={TokenStatusEnum.Revoked}>revoked</SelectItem>
+                                            </SelectGroup>
+                                        </SelectContent>
+                                    </Select>
+                                )}
+                            />
                         );
                     }
 
                     return <Badge variant={statusDisplay.variant}>{statusDisplay.label}</Badge>;
                 },
-                header: ({ column }) => {
-                    const sorted = column.getIsSorted();
-
-                    return (
-                        <Button
-                            className="text-muted-foreground hover:text-primary flex items-center gap-2 p-0 no-underline hover:no-underline"
-                            onClick={() => handleColumnSort(column)}
-                            variant="link"
-                        >
-                            Status
-                            {sorted === 'asc' ? (
-                                <ArrowDown className="size-4" />
-                            ) : sorted === 'desc' ? (
-                                <ArrowUp className="size-4" />
-                            ) : null}
-                        </Button>
-                    );
-                },
+                header: ({ column }) => (
+                    <DataTableColumnHeader
+                        column={column}
+                        title="Status"
+                    />
+                ),
+                meta: { searchable: true },
                 size: 120,
             },
             {
@@ -572,72 +583,55 @@ const SettingsAPITokens = () => {
                         tomorrow.setHours(0, 0, 0, 0);
 
                         return (
-                            <Popover>
-                                <PopoverTrigger asChild>
-                                    <Button
-                                        className={cn(
-                                            'h-8 w-full justify-start text-left font-normal',
-                                            !createFormData.expiresAt && 'text-muted-foreground',
-                                        )}
-                                        variant="outline"
-                                    >
-                                        <CalendarIcon className="mr-2 size-4" />
-                                        {createFormData.expiresAt ? (
-                                            createFormData.expiresAt.toLocaleDateString()
-                                        ) : (
-                                            <span>Pick date</span>
-                                        )}
-                                    </Button>
-                                </PopoverTrigger>
-                                <PopoverContent
-                                    align="start"
-                                    className="w-auto p-0"
-                                >
-                                    <Calendar
-                                        disabled={{ before: tomorrow }}
-                                        mode="single"
-                                        onSelect={(date) => {
-                                            setCreateFormData((prev) => ({ ...prev, expiresAt: date || null }));
-                                        }}
-                                        selected={createFormData.expiresAt || undefined}
-                                    />
-                                </PopoverContent>
-                            </Popover>
+                            <Controller
+                                control={createForm.control}
+                                name="expiresAt"
+                                render={({ field }) => (
+                                    <Popover>
+                                        <PopoverTrigger asChild>
+                                            <Button
+                                                className={cn(
+                                                    'h-8 w-full justify-start text-left font-normal',
+                                                    !field.value && 'text-muted-foreground',
+                                                )}
+                                                variant="outline"
+                                            >
+                                                <CalendarIcon className="mr-2 size-4" />
+                                                {field.value ? (
+                                                    format(field.value, 'd MMM yyyy', { locale: enUS })
+                                                ) : (
+                                                    <span>Pick date</span>
+                                                )}
+                                            </Button>
+                                        </PopoverTrigger>
+                                        <PopoverContent
+                                            align="start"
+                                            className="w-auto p-0"
+                                        >
+                                            <Calendar
+                                                disabled={{ before: tomorrow }}
+                                                mode="single"
+                                                onSelect={(date) => field.onChange(date ?? null)}
+                                                selected={field.value ?? undefined}
+                                            />
+                                        </PopoverContent>
+                                    </Popover>
+                                )}
+                            />
                         );
                     }
 
                     const expiresAt = getTokenExpirationDate(token);
                     const expiresAtString = expiresAt.toISOString();
 
-                    return (
-                        <Tooltip>
-                            <TooltipTrigger asChild>
-                                <div className="cursor-default text-sm">{formatDateTime(expiresAtString)}</div>
-                            </TooltipTrigger>
-                            <TooltipContent>
-                                <div className="text-xs">{formatFullDateTime(expiresAtString)}</div>
-                            </TooltipContent>
-                        </Tooltip>
-                    );
+                    return <div className="text-sm">{formatDate(new Date(expiresAtString))}</div>;
                 },
-                header: ({ column }) => {
-                    const sorted = column.getIsSorted();
-
-                    return (
-                        <Button
-                            className="text-muted-foreground hover:text-primary flex items-center gap-2 p-0 no-underline hover:no-underline"
-                            onClick={() => handleColumnSort(column)}
-                            variant="link"
-                        >
-                            Expires
-                            {sorted === 'asc' ? (
-                                <ArrowDown className="size-4" />
-                            ) : sorted === 'desc' ? (
-                                <ArrowUp className="size-4" />
-                            ) : null}
-                        </Button>
-                    );
-                },
+                header: ({ column }) => (
+                    <DataTableColumnHeader
+                        column={column}
+                        title="Expires"
+                    />
+                ),
                 size: 150,
                 sortingFn: (rowA, rowB) => {
                     const expiresA = getTokenExpirationDate(rowA.original);
@@ -658,35 +652,15 @@ const SettingsAPITokens = () => {
 
                     const dateString = row.getValue('createdAt') as string;
 
-                    return (
-                        <Tooltip>
-                            <TooltipTrigger asChild>
-                                <div className="cursor-default text-sm">{formatDateTime(dateString)}</div>
-                            </TooltipTrigger>
-                            <TooltipContent>
-                                <div className="text-xs">{formatFullDateTime(dateString)}</div>
-                            </TooltipContent>
-                        </Tooltip>
-                    );
+                    return <div className="text-sm">{formatDate(new Date(dateString))}</div>;
                 },
-                header: ({ column }) => {
-                    const sorted = column.getIsSorted();
-
-                    return (
-                        <Button
-                            className="text-muted-foreground hover:text-primary flex items-center gap-2 p-0 no-underline hover:no-underline"
-                            onClick={() => handleColumnSort(column)}
-                            variant="link"
-                        >
-                            Created
-                            {sorted === 'asc' ? (
-                                <ArrowDown className="size-4" />
-                            ) : sorted === 'desc' ? (
-                                <ArrowUp className="size-4" />
-                            ) : null}
-                        </Button>
-                    );
-                },
+                header: ({ column }) => (
+                    <DataTableColumnHeader
+                        column={column}
+                        title="Created"
+                    />
+                ),
+                meta: { columnMenuLabel: 'Created' },
                 size: 120,
                 sortingFn: (rowA, rowB) => {
                     const dateA = new Date(rowA.getValue('createdAt') as string);
@@ -703,53 +677,23 @@ const SettingsAPITokens = () => {
 
                     if (isCreating) {
                         return (
-                            <div className="flex justify-end gap-1">
-                                <Button
-                                    className="size-8 p-0"
-                                    disabled={isCreateLoading || !createFormData.expiresAt}
-                                    onClick={handleCreate}
-                                    variant="ghost"
-                                >
-                                    {isCreateLoading ? (
-                                        <Loader2 className="size-4 animate-spin" />
-                                    ) : (
-                                        <Check className="size-4" />
-                                    )}
-                                </Button>
-                                <Button
-                                    className="size-8 p-0"
-                                    onClick={handleCancelCreate}
-                                    variant="ghost"
-                                >
-                                    <X className="size-4" />
-                                </Button>
-                            </div>
+                            <CreateRowActions
+                                control={createForm.control}
+                                isLoading={isCreateLoading}
+                                onCancel={handleCancelCreate}
+                                onSubmit={handleCreate}
+                            />
                         );
                     }
 
                     if (isEditing) {
                         return (
-                            <div className="flex justify-end gap-1">
-                                <Button
-                                    className="size-8 p-0"
-                                    disabled={isUpdateLoading}
-                                    onClick={() => handleSave(token.tokenId)}
-                                    variant="ghost"
-                                >
-                                    {isUpdateLoading ? (
-                                        <Loader2 className="size-4 animate-spin" />
-                                    ) : (
-                                        <Check className="size-4" />
-                                    )}
-                                </Button>
-                                <Button
-                                    className="size-8 p-0"
-                                    onClick={handleCancelEdit}
-                                    variant="ghost"
-                                >
-                                    <X className="size-4" />
-                                </Button>
-                            </div>
+                            <EditRowActions
+                                control={editForm.control}
+                                isLoading={isUpdateLoading}
+                                onCancel={handleCancelEdit}
+                                onSubmit={() => handleSave(token.tokenId)}
+                            />
                         );
                     }
 
@@ -758,11 +702,12 @@ const SettingsAPITokens = () => {
                             <DropdownMenu>
                                 <DropdownMenuTrigger asChild>
                                     <Button
-                                        className="size-8 p-0"
+                                        aria-label="Open menu"
+                                        className="shrink-0"
+                                        size="icon-sm"
                                         variant="ghost"
                                     >
-                                        <span className="sr-only">Open menu</span>
-                                        <MoreHorizontal className="size-4" />
+                                        <Ellipsis />
                                     </Button>
                                 </DropdownMenuTrigger>
                                 <DropdownMenuContent
@@ -770,8 +715,12 @@ const SettingsAPITokens = () => {
                                     className="min-w-24"
                                 >
                                     <DropdownMenuItem onClick={() => handleEdit(token)}>
-                                        <Pencil className="size-3" />
+                                        <Pencil />
                                         Edit
+                                    </DropdownMenuItem>
+                                    <DropdownMenuItem onClick={() => handleCopyTokenId(token.tokenId)}>
+                                        <Copy />
+                                        Copy Token ID
                                     </DropdownMenuItem>
                                     <DropdownMenuSeparator />
                                     <DropdownMenuItem
@@ -780,12 +729,12 @@ const SettingsAPITokens = () => {
                                     >
                                         {isDeleteLoading && deletingToken?.tokenId === token.tokenId ? (
                                             <>
-                                                <Loader2 className="size-4 animate-spin" />
+                                                <Spinner variant="circle" />
                                                 Deleting...
                                             </>
                                         ) : (
                                             <>
-                                                <Trash className="size-4" />
+                                                <Trash />
                                                 Delete
                                             </>
                                         )}
@@ -803,13 +752,14 @@ const SettingsAPITokens = () => {
             },
         ],
         [
-            createFormData.expiresAt,
+            createForm.control,
+            createNameFieldId,
             deletingToken,
-            editFormData.status,
+            editForm.control,
+            editNameFieldId,
             editingTokenId,
             handleCancelCreate,
             handleCancelEdit,
-            handleColumnSort,
             handleCopyTokenId,
             handleCreate,
             handleDeleteDialogOpen,
@@ -851,29 +801,86 @@ const SettingsAPITokens = () => {
         [deletingToken, handleCopyTokenId, handleDeleteDialogOpen, handleEdit, isDeleteLoading],
     );
 
-    if (isLoading) {
-        return (
-            <div className="flex flex-col gap-4">
-                <SettingsAPITokensHeader onCreateClick={handleCreateNew} />
-                <StatusCard
-                    description="Please wait while we fetch your API tokens"
-                    icon={<Loader2 className="text-muted-foreground size-16 animate-spin" />}
-                    title="Loading tokens..."
+    const pageHeader = (
+        <AppHeader>
+            <AppHeaderContent>
+                <AppHeaderTitle icon={<Key className="size-4 shrink-0" />}>API Tokens</AppHeaderTitle>
+            </AppHeaderContent>
+            <AppHeaderActions>
+                <AppHeaderAction
+                    icon={<Plus />}
+                    label="Create Token"
+                    onClick={handleCreateNew}
+                    variant="secondary"
                 />
-            </div>
+                <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                        <Button
+                            aria-label="Developer tools"
+                            className="size-8 p-0"
+                            size="sm"
+                            variant="ghost"
+                        >
+                            <Ellipsis />
+                        </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent
+                        align="end"
+                        className="min-w-44"
+                    >
+                        <DropdownMenuItem asChild>
+                            <a
+                                href={`${baseUrl}/graphql/playground`}
+                                rel="noopener noreferrer"
+                                target="_blank"
+                            >
+                                <ExternalLink />
+                                GraphQL Playground
+                            </a>
+                        </DropdownMenuItem>
+                        <DropdownMenuItem asChild>
+                            <a
+                                href={`${baseUrl}/swagger/index.html`}
+                                rel="noopener noreferrer"
+                                target="_blank"
+                            >
+                                <ExternalLink />
+                                Swagger UI
+                            </a>
+                        </DropdownMenuItem>
+                    </DropdownMenuContent>
+                </DropdownMenu>
+            </AppHeaderActions>
+        </AppHeader>
+    );
+
+    if (isLoading && !data) {
+        return (
+            <>
+                {pageHeader}
+                <div className="flex flex-1 flex-col gap-4 p-4">
+                    <LoadingState
+                        description="Please wait while we fetch your API tokens"
+                        title="Loading tokens..."
+                    />
+                </div>
+            </>
         );
     }
 
-    if (error) {
+    // Error surface only when there's no data — a failed background refetch must not blank a working list.
+    if (error && !data) {
         return (
-            <div className="flex flex-col gap-4">
-                <SettingsAPITokensHeader onCreateClick={handleCreateNew} />
-                <Alert variant="destructive">
-                    <AlertCircle className="size-4" />
-                    <AlertTitle>Error loading tokens</AlertTitle>
-                    <AlertDescription>{error.message}</AlertDescription>
-                </Alert>
-            </div>
+            <>
+                {pageHeader}
+                <div className="flex flex-1 flex-col gap-4 p-4">
+                    <ErrorState
+                        message={error.message}
+                        onRetry={refetch}
+                        title="Error loading tokens"
+                    />
+                </div>
+            </>
         );
     }
 
@@ -881,108 +888,109 @@ const SettingsAPITokens = () => {
 
     if (tokens.length === 0 && !creatingToken) {
         return (
-            <div className="flex flex-col gap-4">
-                <SettingsAPITokensHeader onCreateClick={handleCreateNew} />
-                <StatusCard
-                    action={
-                        <Button
-                            onClick={handleCreateNew}
-                            variant="secondary"
-                        >
-                            <Plus className="size-4" />
-                            Create Token
-                        </Button>
-                    }
-                    description="Create your first API token to access PentAGI programmatically"
-                    icon={<Key className="text-muted-foreground size-8" />}
-                    title="No API tokens configured"
-                />
-            </div>
+            <>
+                {pageHeader}
+                <div className="flex flex-1 flex-col gap-4 p-4">
+                    <Empty>
+                        <EmptyHeader>
+                            <EmptyMedia variant="icon">
+                                <Key />
+                            </EmptyMedia>
+                            <EmptyTitle>No API tokens configured</EmptyTitle>
+                            <EmptyDescription>
+                                Create your first API token to access PentAGI programmatically
+                            </EmptyDescription>
+                        </EmptyHeader>
+                        <EmptyContent>
+                            <Button
+                                onClick={handleCreateNew}
+                                variant="secondary"
+                            >
+                                <Plus />
+                                Create Token
+                            </Button>
+                        </EmptyContent>
+                    </Empty>
+                </div>
+            </>
         );
     }
 
     return (
-        <div className="flex flex-col gap-4">
-            <SettingsAPITokensHeader onCreateClick={handleCreateNew} />
+        <>
+            {pageHeader}
+            <div className="flex flex-1 flex-col gap-4 p-4">
+                <DataTable<APIToken>
+                    columns={columns}
+                    data={creatingToken ? [createNewTokenPlaceholder, ...tokens] : tokens}
+                    empty={{ entityName: 'API tokens' }}
+                    filterPlaceholder="Filter tokens..."
+                    filterValue={filter}
+                    onFilterChange={setFilter}
+                    onPageChange={handlePageChange}
+                    pageIndex={currentPage}
+                    renderRowContextMenu={renderRowContextMenu}
+                />
 
-            {(createError || updateError || deleteError || deleteErrorMessage) && (
-                <Alert variant="destructive">
-                    <AlertCircle className="size-4" />
-                    <AlertTitle>Error</AlertTitle>
-                    <AlertDescription>
-                        {createError?.message || updateError?.message || deleteError?.message || deleteErrorMessage}
-                    </AlertDescription>
-                </Alert>
-            )}
+                <Dialog
+                    onOpenChange={setShowTokenDialog}
+                    open={showTokenDialog}
+                >
+                    <DialogContent>
+                        <DialogHeader>
+                            <DialogTitle>API Token Created</DialogTitle>
+                            <DialogDescription>
+                                Copy this token now. You won't be able to see it again for security reasons.
+                            </DialogDescription>
+                        </DialogHeader>
+                        <div className="bg-muted rounded p-4">
+                            <code className="text-sm break-all">{tokenSecret}</code>
+                        </div>
+                        <div className="flex gap-2">
+                            <Button
+                                className="flex-1"
+                                onClick={async () => {
+                                    if (tokenSecret) {
+                                        const success = await copyToClipboard(tokenSecret);
 
-            <DataTable<APIToken>
-                columns={columns}
-                data={creatingToken ? [createNewTokenPlaceholder, ...tokens] : tokens}
-                filterColumn="name"
-                filterPlaceholder="Filter token names..."
-                onPageChange={handlePageChange}
-                pageIndex={currentPage}
-                renderRowContextMenu={renderRowContextMenu}
-            />
-
-            <Dialog
-                onOpenChange={setShowTokenDialog}
-                open={showTokenDialog}
-            >
-                <DialogContent>
-                    <DialogHeader>
-                        <DialogTitle>API Token Created</DialogTitle>
-                        <DialogDescription>
-                            Copy this token now. You won't be able to see it again for security reasons.
-                        </DialogDescription>
-                    </DialogHeader>
-                    <div className="bg-muted rounded p-4">
-                        <code className="text-sm break-all">{tokenSecret}</code>
-                    </div>
-                    <div className="flex gap-2">
-                        <Button
-                            className="flex-1"
-                            onClick={async () => {
-                                if (tokenSecret) {
-                                    const success = await copyToClipboard(tokenSecret);
-
-                                    if (success) {
-                                        toast.success('Token copied to clipboard');
-                                    } else {
-                                        toast.error('Failed to copy token to clipboard');
+                                        if (success) {
+                                            toast.success('Token copied to clipboard');
+                                        } else {
+                                            toast.error('Failed to copy token to clipboard');
+                                        }
                                     }
-                                }
-                            }}
-                            variant="secondary"
-                        >
-                            <Copy className="size-4" />
-                            Copy Token
-                        </Button>
-                        <Button
-                            className="flex-1"
-                            onClick={() => {
-                                setShowTokenDialog(false);
-                                setTokenSecret(null);
-                            }}
-                            variant="outline"
-                        >
-                            Close
-                        </Button>
-                    </div>
-                </DialogContent>
-            </Dialog>
+                                }}
+                                variant="secondary"
+                            >
+                                <Copy />
+                                Copy Token
+                            </Button>
+                            <Button
+                                className="flex-1"
+                                onClick={() => {
+                                    setShowTokenDialog(false);
+                                    setTokenSecret(null);
+                                }}
+                                variant="outline"
+                            >
+                                Close
+                            </Button>
+                        </div>
+                    </DialogContent>
+                </Dialog>
 
-            <ConfirmationDialog
-                cancelText="Cancel"
-                confirmText="Delete"
-                handleConfirm={() => handleDelete(deletingToken?.tokenId)}
-                handleOpenChange={setIsDeleteDialogOpen}
-                isOpen={isDeleteDialogOpen}
-                itemName={deletingToken?.name || deletingToken?.tokenId}
-                itemType="token"
-            />
-        </div>
+                <ConfirmationDialog
+                    cancelText="Cancel"
+                    confirmText="Delete"
+                    handleConfirm={() => handleDelete(deletingToken?.tokenId)}
+                    handleOpenChange={setIsDeleteDialogOpen}
+                    isOpen={isDeleteDialogOpen}
+                    itemName={deletingToken?.name || deletingToken?.tokenId}
+                    itemType="token"
+                />
+            </div>
+        </>
     );
-};
+}
 
 export default SettingsAPITokens;

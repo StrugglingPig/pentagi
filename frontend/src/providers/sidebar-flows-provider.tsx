@@ -1,8 +1,9 @@
+import { useQuery } from '@apollo/client/react';
 import { createContext, type ReactNode, useContext, useMemo } from 'react';
 
 import type { FlowFragmentFragment } from '@/graphql/types';
 
-import { useFlowsQuery } from '@/graphql/types';
+import { FlowsDocument } from '@/graphql/types';
 
 export type Flow = FlowFragmentFragment;
 
@@ -16,10 +17,9 @@ interface SidebarFlowsProviderProps {
     children: ReactNode;
 }
 
-export const SidebarFlowsProvider = ({ children }: SidebarFlowsProviderProps) => {
-    // Single query for sidebar flows with cache-first policy
+export function SidebarFlowsProvider({ children }: SidebarFlowsProviderProps) {
     // Subscriptions are handled by FlowsProvider in FlowsLayout
-    const { data: flowsData } = useFlowsQuery({
+    const { data: flowsData } = useQuery(FlowsDocument, {
         fetchPolicy: 'cache-first',
         nextFetchPolicy: 'cache-first',
     });
@@ -34,9 +34,9 @@ export const SidebarFlowsProvider = ({ children }: SidebarFlowsProviderProps) =>
     );
 
     return <SidebarFlowsContext.Provider value={value}>{children}</SidebarFlowsContext.Provider>;
-};
+}
 
-export const useSidebarFlows = () => {
+export function useSidebarFlows() {
     const context = useContext(SidebarFlowsContext);
 
     if (context === undefined) {
@@ -44,4 +44,4 @@ export const useSidebarFlows = () => {
     }
 
     return context;
-};
+}

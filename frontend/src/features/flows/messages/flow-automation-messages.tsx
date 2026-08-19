@@ -1,8 +1,8 @@
 import { zodResolver } from '@hookform/resolvers/zod';
-import debounce from 'lodash/debounce';
 import { ChevronDown, Inbox, ListFilter, Search, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useForm } from 'react-hook-form';
+import { useDebouncedCallback } from 'use-debounce';
 import { z } from 'zod';
 
 import { Button } from '@/components/ui/button';
@@ -32,12 +32,11 @@ const searchFormSchema = z.object({
     search: z.string(),
 });
 
-const FlowAutomationMessages = ({ className }: FlowAutomationMessagesProps) => {
+function FlowAutomationMessages({ className }: FlowAutomationMessagesProps) {
     const { flowData, flowId, flowStatus, stopAutomation, submitAutomationMessage } = useFlow();
 
     const logs = useMemo(() => flowData?.messageLogs ?? [], [flowData?.messageLogs]);
 
-    // Separate state for immediate input value and debounced search value
     const [debouncedSearchValue, setDebouncedSearchValue] = useState('');
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [isCanceling, setIsCanceling] = useState(false);
@@ -58,13 +57,9 @@ const FlowAutomationMessages = ({ className }: FlowAutomationMessagesProps) => {
     const searchValue = form.watch('search');
     const filter = form.watch('filter');
 
-    const debouncedUpdateSearch = useMemo(
-        () =>
-            debounce((value: string) => {
-                setDebouncedSearchValue(value);
-            }, 500),
-        [],
-    );
+    const debouncedUpdateSearch = useDebouncedCallback((value: string) => {
+        setDebouncedSearchValue(value);
+    }, 500);
 
     useEffect(() => {
         debouncedUpdateSearch(searchValue);
@@ -74,14 +69,12 @@ const FlowAutomationMessages = ({ className }: FlowAutomationMessagesProps) => {
         };
     }, [searchValue, debouncedUpdateSearch]);
 
-    // Cleanup debounced function on unmount
     useEffect(() => {
         return () => {
             debouncedUpdateSearch.cancel();
         };
     }, [debouncedUpdateSearch]);
 
-    // Clear search when flow changes to prevent stale search state
     useEffect(() => {
         form.reset({
             filter: {
@@ -94,7 +87,6 @@ const FlowAutomationMessages = ({ className }: FlowAutomationMessagesProps) => {
         debouncedUpdateSearch.cancel();
     }, [flowId, form, debouncedUpdateSearch]);
 
-    // Check if any filters are active
     const hasActiveFilters = useMemo(() => {
         const hasSearch = !!searchValue.trim();
         const hasTaskFilters = !!(filter?.taskIds?.length || filter?.subtaskIds?.length);
@@ -102,14 +94,11 @@ const FlowAutomationMessages = ({ className }: FlowAutomationMessagesProps) => {
         return hasSearch || hasTaskFilters;
     }, [searchValue, filter]);
 
-    // Memoize filtered logs to avoid recomputing on every render
-    // Use debouncedSearchValue for filtering to improve performance
     const filteredLogs = useMemo(() => {
         const search = debouncedSearchValue.toLowerCase().trim();
 
         let filtered = logs || [];
 
-        // Filter by search
         if (search) {
             filtered = filtered.filter(
                 (log) =>
@@ -119,7 +108,6 @@ const FlowAutomationMessages = ({ className }: FlowAutomationMessagesProps) => {
             );
         }
 
-        // Filter by selected tasks and subtasks
         if (filter?.taskIds?.length || filter?.subtaskIds?.length) {
             const selectedTaskIds = new Set(filter.taskIds ?? []);
             const selectedSubtaskIds = new Set(filter.subtaskIds ?? []);
@@ -140,13 +128,11 @@ const FlowAutomationMessages = ({ className }: FlowAutomationMessagesProps) => {
         return filtered;
     }, [logs, debouncedSearchValue, filter]);
 
-    // Get placeholder text based on flow status
     const placeholder = useMemo(() => {
         if (!flowId) {
             return 'Select a flow...';
         }
 
-        // Flow-specific statuses
         switch (flowStatus) {
             case StatusType.Created: {
                 return 'The flow is starting...';
@@ -171,7 +157,6 @@ const FlowAutomationMessages = ({ className }: FlowAutomationMessagesProps) => {
         }
     }, [flowId, flowStatus]);
 
-    // Message submission handler
     const handleSubmitMessage = async (values: FlowFormValues) => {
         setIsSubmitting(true);
 
@@ -182,7 +167,6 @@ const FlowAutomationMessages = ({ className }: FlowAutomationMessagesProps) => {
         }
     };
 
-    // Stop automation handler
     const handleStopAutomation = async () => {
         setIsCanceling(true);
 
@@ -193,7 +177,6 @@ const FlowAutomationMessages = ({ className }: FlowAutomationMessagesProps) => {
         }
     };
 
-    // Reset filters handler
     const handleResetFilters = () => {
         form.reset({
             filter: {
@@ -233,6 +216,7 @@ const FlowAutomationMessages = ({ className }: FlowAutomationMessagesProps) => {
                                         {field.value && (
                                             <InputGroupAddon align="inline-end">
                                                 <InputGroupButton
+                                                    aria-label="Clear message search"
                                                     onClick={() => {
                                                         form.reset({ search: '' });
                                                         setDebouncedSearchValue('');
@@ -282,6 +266,7 @@ const FlowAutomationMessages = ({ className }: FlowAutomationMessagesProps) => {
 
                     {!isScrolledToBottom && (
                         <Button
+                            aria-label="Scroll to latest message"
                             className="absolute right-4 bottom-4 z-10 shadow-md hover:shadow-lg"
                             onClick={() => scrollToEnd()}
                             size="icon-sm"
@@ -347,6 +332,6 @@ const FlowAutomationMessages = ({ className }: FlowAutomationMessagesProps) => {
             </div>
         </div>
     );
-};
+}
 
 export default FlowAutomationMessages;

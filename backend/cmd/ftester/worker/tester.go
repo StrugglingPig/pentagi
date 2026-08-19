@@ -66,7 +66,7 @@ func NewTester(
 	functions := &tools.Functions{}
 
 	// Initialize tools flowExecutor
-	flowExecutor, err := tools.NewFlowToolsExecutor(db, cfg, dockerClient, functions, flowID)
+	flowExecutor, err := tools.NewFlowToolsExecutor(db, cfg, dockerClient, functions, userID, flowID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create flow tools executor: %w", err)
 	}
@@ -81,12 +81,14 @@ func NewTester(
 	flowExecutor.SetSearchLogProvider(proxies.GetSearchLogProvider())
 	flowExecutor.SetTermLogProvider(proxies.GetTermLogProvider())
 	flowExecutor.SetVectorStoreLogProvider(proxies.GetVectorStoreLogProvider())
+	flowExecutor.SetToolCallLogProvider(proxies.GetToolCallLogProvider())
+	flowExecutor.SetKnowledgeProvider(proxies.GetKnowledgeProvider())
 	flowExecutor.SetGraphitiClient(providerController.GraphitiClient())
 
 	// Initialize tool executor
 	toolExecutor, err := newToolExecutor(
 		flowExecutor, cfg, db, dockerClient, nil, proxies,
-		flowID, taskID, subtaskID, providerController.Embedder(),
+		userID, flowID, taskID, subtaskID, providerController.Embedder(),
 		providerController.GraphitiClient(),
 	)
 	if err != nil {
@@ -144,23 +146,28 @@ func (t *tester) initFlowProviderController() error {
 	// Setup Langfuse observability to track the execution lifecycle
 	// This is critical for debugging and monitoring flow performance
 	// We use trace context to connect this execution with earlier/later runs
+	traceMetadata := langfuse.Metadata{
+		"flow_id":       flow.ID,
+		"user_id":       flow.UserID,
+		"user_email":    user.Mail,
+		"user_name":     user.Name,
+		"user_hash":     user.Hash,
+		"user_role":     user.RoleName,
+		"provider_name": flow.ModelProviderName,
+		"provider_type": flow.ModelProviderType,
+	}
+	if t.cfg.HasTenant() {
+		traceMetadata["tenant_id"] = t.cfg.TenantID
+	}
+
 	ctx, observation := obs.Observer.NewObservation(t.ctx,
 		langfuse.WithObservationTraceID(flow.TraceID.String),
 		langfuse.WithObservationTraceContext(
-			langfuse.WithTraceName(fmt.Sprintf("%d flow worker", flow.ID)),
-			langfuse.WithTraceUserID(user.Mail),
-			langfuse.WithTraceTags([]string{"controller"}),
-			langfuse.WithTraceSessionID(fmt.Sprintf("flow-%d", flow.ID)),
-			langfuse.WithTraceMetadata(langfuse.Metadata{
-				"flow_id":       flow.ID,
-				"user_id":       flow.UserID,
-				"user_email":    user.Mail,
-				"user_name":     user.Name,
-				"user_hash":     user.Hash,
-				"user_role":     user.RoleName,
-				"provider_name": flow.ModelProviderName,
-				"provider_type": flow.ModelProviderType,
-			}),
+			langfuse.WithTraceName(fmt.Sprintf("%s%d flow worker", t.cfg.TenantLabel(), flow.ID)),
+			langfuse.WithTraceUserID(t.cfg.TenantUserID(user.Mail)),
+			langfuse.WithTraceTags(t.cfg.TenantTags("controller")),
+			langfuse.WithTraceSessionID(t.cfg.ScopedName(fmt.Sprintf("flow-%d", flow.ID))),
+			langfuse.WithTraceMetadata(traceMetadata),
 		),
 	)
 

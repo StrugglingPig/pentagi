@@ -126,16 +126,17 @@ func (w *noopObservationWrapper) ctx() context.Context {
 }
 
 func (w *noopObservationWrapper) end(result string, err error, durationSeconds float64) {
-	// no-op
 }
 
 type customExecutor struct {
+	userID    int64
 	flowID    int64
 	taskID    *int64
 	subtaskID *int64
 
 	db    database.Querier
 	mlp   MsgLogProvider
+	tclp  ToolCallLogProvider
 	store *pgvector.Store
 	vslp  VectorStoreLogProvider
 
@@ -256,7 +257,6 @@ func (ce *customExecutor) Execute(
 		return fmt.Sprintf("failed to unmarshal '%s' tool call arguments: %v: fix it", name, err), nil
 	}
 
-	// Create observation based on tool type
 	toolType := GetToolType(name)
 	var obsWrapper observationWrapper
 
@@ -271,11 +271,9 @@ func (ce *customExecutor) Execute(
 		// Skip - handlers create RETRIEVER internally
 		obsWrapper = &noopObservationWrapper{context: ctx}
 	default:
-		// Unknown type - use no-op wrapper
 		obsWrapper = &noopObservationWrapper{context: ctx}
 	}
 
-	// Use context from observation wrapper
 	ctx = obsWrapper.ctx()
 
 	var err error
@@ -288,15 +286,7 @@ func (ce *customExecutor) Execute(
 		}
 	}
 
-	tc, err := ce.db.CreateToolcall(ctx, database.CreateToolcallParams{
-		CallID:    id,
-		Status:    database.ToolcallStatusRunning,
-		Name:      name,
-		Args:      args,
-		FlowID:    ce.flowID,
-		TaskID:    database.Int64ToNullInt64(ce.taskID),
-		SubtaskID: database.Int64ToNullInt64(ce.subtaskID),
-	})
+	tcID, err := ce.tclp.PutLog(ctx, id, name, args, ce.taskID, ce.subtaskID)
 	if err != nil {
 		obsWrapper.end("", err, time.Since(startTime).Seconds())
 		return "", fmt.Errorf("failed to create toolcall: %w", err)
@@ -305,13 +295,12 @@ func (ce *customExecutor) Execute(
 	wrapHandler := func(ctx context.Context, name string, args json.RawMessage) (string, database.MsglogResultFormat, error) {
 		resultFormat := getMessageResultFormat(name)
 		result, err := handler(ctx, name, args)
+		persistCtx := context.WithoutCancel(ctx)
+
 		if err != nil {
 			durationDelta := time.Since(startTime).Seconds()
-			_, _ = ce.db.UpdateToolcallFailedResult(ctx, database.UpdateToolcallFailedResultParams{
-				Result:          fmt.Sprintf("failed to execute handler: %s", err.Error()),
-				DurationSeconds: durationDelta,
-				ID:              tc.ID,
-			})
+			failureResult := fmt.Sprintf("failed to execute handler: %s", err.Error())
+			_ = ce.tclp.UpdateLogFailed(persistCtx, tcID, failureResult, durationDelta)
 			return "", resultFormat, fmt.Errorf("failed to execute handler: %w", err)
 		}
 
@@ -322,14 +311,11 @@ func (ce *customExecutor) Execute(
 			if err != nil {
 				return "", resultFormat, fmt.Errorf("failed to get summarize prompt: %w", err)
 			}
-			result, err = ce.summarizer(ctx, summarizePrompt)
+			result, err = ce.summarizer(persistCtx, summarizePrompt)
 			if err != nil {
 				durationDelta := time.Since(startTime).Seconds()
-				_, _ = ce.db.UpdateToolcallFailedResult(ctx, database.UpdateToolcallFailedResultParams{
-					Result:          fmt.Sprintf("failed to summarize result: %s", err.Error()),
-					DurationSeconds: durationDelta,
-					ID:              tc.ID,
-				})
+				failureResult := fmt.Sprintf("failed to summarize result: %s", err.Error())
+				_ = ce.tclp.UpdateLogFailed(persistCtx, tcID, failureResult, durationDelta)
 				return "", resultFormat, fmt.Errorf("failed to summarize result: %w", err)
 			}
 			resultFormat = database.MsglogResultFormatMarkdown
@@ -344,11 +330,7 @@ func (ce *customExecutor) Execute(
 		}
 
 		durationDelta := time.Since(startTime).Seconds()
-		_, err = ce.db.UpdateToolcallFinishedResult(ctx, database.UpdateToolcallFinishedResultParams{
-			Result:          result,
-			DurationSeconds: durationDelta,
-			ID:              tc.ID,
-		})
+		err = ce.tclp.UpdateLogSuccess(persistCtx, tcID, result, durationDelta)
 		if err != nil {
 			return "", resultFormat, fmt.Errorf("failed to update toolcall result: %w", err)
 		}
@@ -563,13 +545,14 @@ func (ce *customExecutor) storeToolResult(ctx context.Context, name, result stri
 		if doc.Metadata == nil {
 			doc.Metadata = map[string]any{}
 		}
+		doc.Metadata["user_id"] = ce.userID
+		doc.Metadata["flow_id"] = ce.flowID
 		if ce.taskID != nil {
 			doc.Metadata["task_id"] = *ce.taskID
 		}
 		if ce.subtaskID != nil {
 			doc.Metadata["subtask_id"] = *ce.subtaskID
 		}
-		doc.Metadata["flow_id"] = ce.flowID
 		doc.Metadata["tool_name"] = name
 		if def, ok := registryDefinitions[name]; ok {
 			doc.Metadata["tool_description"] = def.Description

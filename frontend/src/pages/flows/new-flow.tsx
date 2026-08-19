@@ -1,17 +1,16 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
-import { Breadcrumb, BreadcrumbItem, BreadcrumbList, BreadcrumbPage } from '@/components/ui/breadcrumb';
+import { AppHeader, AppHeaderContent, AppHeaderTitle } from '@/components/layouts/app/app-header';
 import { Card, CardContent } from '@/components/ui/card';
-import { Separator } from '@/components/ui/separator';
-import { SidebarTrigger } from '@/components/ui/sidebar';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { FlowForm, type FlowFormValues } from '@/features/flows/flow-form';
+import { routes } from '@/lib/routes';
 import { useFlows } from '@/providers/flows-provider';
 import { useProviders } from '@/providers/providers-provider';
 import { useSystemSettings } from '@/providers/system-settings-provider';
 
-const NewFlow = () => {
+function NewFlow() {
     const navigate = useNavigate();
 
     const { selectedProvider } = useProviders();
@@ -21,7 +20,6 @@ const NewFlow = () => {
     const [isLoading, setIsLoading] = useState(false);
     const [flowType, setFlowType] = useState<'assistant' | 'automation'>('automation');
 
-    // Calculate default useAgents value (only for assistant type)
     const shouldUseAgents = useMemo(() => {
         return settings?.assistantUseAgents ?? false;
     }, [settings?.assistantUseAgents]);
@@ -37,8 +35,7 @@ const NewFlow = () => {
             const flowId = flowType === 'automation' ? await createFlow(values) : await createFlowWithAssistant(values);
 
             if (flowId) {
-                // Navigate to the new flow page with tab parameter
-                navigate(`/flows/${flowId}?tab=${flowType}`);
+                navigate(routes.flow(flowId, { tab: flowType }));
             }
         } finally {
             setIsLoading(false);
@@ -47,26 +44,17 @@ const NewFlow = () => {
 
     return (
         <>
-            <header className="bg-background sticky top-0 z-10 flex h-12 shrink-0 items-center gap-2 border-b px-4">
-                <SidebarTrigger className="-ml-1" />
-                <Separator
-                    className="mr-2 h-4"
-                    orientation="vertical"
-                />
-                <Breadcrumb>
-                    <BreadcrumbList>
-                        <BreadcrumbItem>
-                            <BreadcrumbPage>New flow</BreadcrumbPage>
-                        </BreadcrumbItem>
-                    </BreadcrumbList>
-                </Breadcrumb>
-            </header>
+            <AppHeader>
+                <AppHeaderContent>
+                    <AppHeaderTitle>New flow</AppHeaderTitle>
+                </AppHeaderContent>
+            </AppHeader>
             <div className="flex min-h-[calc(100dvh-3rem)] items-center justify-center p-4">
                 <Card className="w-full max-w-2xl">
                     <CardContent className="flex flex-col gap-4 pt-6">
-                        <div className="text-center">
-                            <h1 className="text-2xl font-semibold">Create a new flow</h1>
-                            <p className="text-muted-foreground mt-2">Describe what you would like PentAGI to test</p>
+                        <div className="flex flex-col gap-2 text-center">
+                            <h2 className="text-2xl font-semibold">Create a new flow</h2>
+                            <p className="text-muted-foreground">Describe what you would like PentAGI to test</p>
                         </div>
                         <Tabs
                             onValueChange={(value) => setFlowType(value as 'assistant' | 'automation')}
@@ -108,6 +96,6 @@ const NewFlow = () => {
             </div>
         </>
     );
-};
+}
 
 export default NewFlow;
